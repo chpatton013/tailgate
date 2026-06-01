@@ -25,9 +25,10 @@ if File.exist?(env_file)
   end
 end
 
-authkey      = ENV["TS_AUTHKEY"]      || env["TS_AUTHKEY"]      || ""
-login_server = ENV["TS_LOGIN_SERVER"] || env["TS_LOGIN_SERVER"] || "https://headscale.example.com"
-box          = ENV["TIER2_BOX"]       || env["TIER2_BOX"]       || "perk/ubuntu-2204-arm64"
+authkey       = ENV["TS_AUTHKEY"]         || env["TS_AUTHKEY"]         || ""
+login_server  = ENV["TS_LOGIN_SERVER"]    || env["TS_LOGIN_SERVER"]    || "https://headscale.example.com"
+magicdns_dom  = ENV["TS_MAGICDNS_DOMAIN"] || env["TS_MAGICDNS_DOMAIN"] || "ts.example.com"
+box           = ENV["TIER2_BOX"]          || env["TIER2_BOX"]          || "perk/ubuntu-2204-arm64"
 
 if authkey.empty?
   warn "tier2: TS_AUTHKEY is empty in ../.env — mint a fresh key: ../bin/mint-authkey --write-env"
@@ -41,7 +42,7 @@ vmnet_socket = "#{brew}/var/run/socket_vmnet"
 
 Vagrant.configure("2") do |config|
   config.vm.box      = box
-  config.vm.hostname = "tailgate-gw-probe"
+  config.vm.hostname = "tailgate-gw"
   config.vm.synced_folder ".", "/vagrant", disabled: true
 
   config.vm.provider "qemu" do |qe|
@@ -72,8 +73,9 @@ Vagrant.configure("2") do |config|
   config.vm.provision "shell" do |s|
     s.path = "provision.sh"
     s.env  = {
-      "TS_AUTHKEY"      => authkey,
-      "TS_LOGIN_SERVER" => login_server,
+      "TS_AUTHKEY"         => authkey,
+      "TS_LOGIN_SERVER"    => login_server,
+      "TS_MAGICDNS_DOMAIN" => magicdns_dom,
     }
   end
 end

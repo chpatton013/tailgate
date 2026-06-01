@@ -21,7 +21,7 @@ GW_IP="$(vagrant ssh -c "ip -4 addr show | awk '/192\\.168\\.105\\./{print \$2}'
 [[ -n "$GW_IP" ]] || { err "Could not find the gateway's 192.168.105.x IP. Is the VM up (vagrant status)?"; exit 1; }
 
 # First peer that isn't the gateway itself, from the VM's tailscale view.
-PEER_IP="$(vagrant ssh -c "tailscale status 2>/dev/null | grep -v tailgate-gw-probe | awk '/^100\\./{print \$1; exit}'" 2>/dev/null | tr -d '\r' | head -1)"
+PEER_IP="$(vagrant ssh -c "tailscale status 2>/dev/null | grep -v tailgate-gw | awk '/^100\\./{print \$1; exit}'" 2>/dev/null | tr -d '\r' | head -1)"
 [[ -n "$PEER_IP" ]] || { err "No tailnet peer found via the VM. Check: cd tier2 && vagrant ssh -c 'tailscale status'"; exit 1; }
 
 echo "  gateway VM : $GW_IP"

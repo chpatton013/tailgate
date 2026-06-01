@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# tailgate-tier2 — manage the Tier 2 transparent gateway and the host-side route +
+# split-DNS wiring, so a normal browser/app reaches the tailnet with no per-tool config.
+#
+#   tailgate-tier2 vm-up         boot + provision the gateway VM (cd tier2; vagrant up)
+#   tailgate-tier2 up            wire the host: route 100.64.0.0/10 -> VM, /etc/resolver
+#   tailgate-tier2 down          remove the host route + resolver
+#   tailgate-tier2 status        show VM, route, resolver, and DNS state
+#   tailgate-tier2 probe         run the reachability probe (bin/tier2-probe)
+#   tailgate-tier2 vm-destroy    destroy the VM (cd tier2; vagrant destroy -f)
+#
+# `up`/`down` use sudo (route + /etc/resolver). The VM IP is discovered dynamically,
+# so no static IP is required; re-run `up` after a reboot if the VM's IP changes.
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TIER2_DIR="$REPO_ROOT/tier2"
+CGNAT="100.64.0.0/10"
+
+# Pull the MagicDNS domain from .env (defaults to the placeholder).
+DOMAIN="ts.example.com"
+if [[ -f "$REPO_ROOT/.env" ]]; then
+  # shellcheck disable=SC1091
+  set -a; source "$REPO_ROOT/.env"; set +a
+  DOMAIN="${TS_MAGICDNS_DOMAIN:-$DOMAIN}"
+fi
+RESOLVER_FILE="/etc/resolver/${DOMAIN}"
+
+err() { printf '\033[31m%s\033[0m\n' "$*" >&2; }
+ok()  { printf '\033[32m%s\033[0m\n' "$*"; }
+info(){ printf '%s\n' "$*"; }
+
+discover_gw_ip() {
+  ( cd "$TIER2_DIR" && vagrant ssh -c \
+    "ip -4 addr show | awk '/192\\.168\\.105\\./{print \$2}' | cut -d/ -f1" 2>/dev/null \
+  ) | tr -d '\r' | head -1
+}
+
+cmd_vm_up()      { ( cd "$TIER2_DIR" && vagrant up "$@" ); }
+cmd_vm_destroy() { ( cd "$TIER2_DIR" && vagrant destroy -f "$@" ); }
+cmd_probe()      { exec "$REPO_ROOT/bin/tier2-probe" "$@"; }
+
+cmd_up() {
+  local gw; gw="$(discover_gw_ip)"
+  [[ -n "$gw" ]] || { err "Could not find the gateway VM IP. Is it up?  tailgate-tier2 vm-up"; exit 1; }
+  info "Gateway VM: $gw   MagicDNS domain: $DOMAIN"
+
+  info "Adding route $CGNAT -> $gw  (sudo)"
+  sudo route -n delete -net "$CGNAT" >/dev/null 2>&1 || true
+  sudo route -n add -net "$CGNAT" "$gw"
+
+  info "Writing $RESOLVER_FILE -> nameserver $gw  (sudo)"
+  sudo mkdir -p /etc/resolver
+  printf 'nameserver %s\n' "$gw" | sudo tee "$RESOLVER_FILE" >/dev/null
+
+  ok "Tier 2 up. Try:  ssh user@somenode.${DOMAIN}   or open http://somenode.${DOMAIN} in a browser."
+  info "(Reaches services on a node's tailnet IP. Loopback-bound services still need 'tailgate forward'.)"
+}
+
+cmd_down() {
+  info "Removing route $CGNAT  (sudo)"
+  sudo route -n delete -net "$CGNAT" >/dev/null 2>&1 || true
+  info "Removing $RESOLVER_FILE  (sudo)"
+  sudo rm -f "$RESOLVER_FILE"
+  ok "Tier 2 down."
+}
+
+cmd_status() {
+  info "=== VM ==="
+  ( cd "$TIER2_DIR" && vagrant status 2>/dev/null | sed -n '3,6p' ) || true
+  local gw; gw="$(discover_gw_ip || true)"
+  [[ -n "$gw" ]] && info "  gateway IP: $gw"
+  info "=== host route for $CGNAT ==="
+  netstat -rn -f inet 2>/dev/null | awk '/^100\.64/{print "  "$0}' || true
+  info "=== /etc/resolver/$DOMAIN ==="
+  [[ -f "$RESOLVER_FILE" ]] && sed 's/^/  /' "$RESOLVER_FILE" || info "  (absent)"
+  info "=== scutil view for $DOMAIN ==="
+  scutil --dns | grep -A3 "$DOMAIN" | sed 's/^/  /' || info "  (not in resolver list)"
+}
+
+usage() { sed -n '2,13p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+
+sub="${1:-}"; shift || true
+case "$sub" in
+  vm-up)      cmd_vm_up "$@";;
+  vm-destroy) cmd_vm_destroy "$@";;
+  up)         cmd_up "$@";;
+  down)       cmd_down "$@";;
+  status)     cmd_status "$@";;
+  probe)      cmd_probe "$@";;
+  ""|-h|--help|help) usage;;
+  *) err "unknown command: $sub"; usage; exit 1;;
+esac

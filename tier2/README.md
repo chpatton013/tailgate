@@ -1,82 +1,86 @@
-# Tier 2 — routing probe
+# Tier 2 — transparent gateway
 
-Before building the full transparent-routing gateway, this settles one question:
+A small QEMU + socket_vmnet Linux VM joins the tailnet in TUN mode and acts as a
+**gateway**: the macOS host routes `100.64.0.0/10` to it and forwards the tailnet
+MagicDNS domain to it, so a *normal* browser/terminal reaches tailnet nodes by name
+with **no per-tool config**. The gateway NATs host traffic out `tailscale0` and runs a
+`dnsmasq` forwarder to tailscaled's MagicDNS resolver (`100.100.100.100`).
 
-> With a host route for `100.64.0.0/10` pointing at a gateway VM, can the host
-> actually reach the tailnet — or does the corporate all-networks proxy
-> (network extension) intercept CGNAT-range traffic?
+Routing through this gateway was validated by the probe (see
+[`../docs/research-and-design.md` §7.1](../docs/research-and-design.md)) — the corporate
+all-networks proxy does not intercept CGNAT-routed traffic on this host.
 
-If it works, the same VM is the foundation of real Tier 2. If it's blocked, we
-pivot to the proxy-everywhere approach instead of fighting the corporate proxy.
+Driven by `../bin/tailgate-tier2` (run from anywhere):
 
-See [`../docs/research-and-design.md` §7.1](../docs/research-and-design.md) for context.
+```
+tailgate-tier2 vm-up      boot + provision the gateway VM
+tailgate-tier2 up         wire the host (route + /etc/resolver)   [sudo]
+tailgate-tier2 status     show VM / route / resolver / DNS state
+tailgate-tier2 down       remove the host route + resolver        [sudo]
+tailgate-tier2 vm-destroy destroy the VM
+tailgate-tier2 probe      run the standalone reachability probe
+```
 
 ## One-time prerequisites
 
 ```sh
-# 1. Repair Vagrant (a stale vagrant-cachier pin breaks `vagrant plugin list`):
-vagrant plugin expunge --reinstall
+# 1. Repair Vagrant if `vagrant plugin list` is broken by a stale pin:
+vagrant plugin expunge --force && vagrant plugin install vagrant-qemu
 
-# 2. Install socket_vmnet (gives the QEMU guest a host-reachable 192.168.105.x IP):
+# 2. socket_vmnet — gives the guest a host-reachable 192.168.105.x IP:
 brew install socket_vmnet
 sudo brew services start socket_vmnet      # privileged daemon via launchd
 
-# 3. Mint a FRESH pre-auth key for the VM (the Tier 1 container consumed the last
-#    single-use one) and write it to ../.env:
+# 3. A FRESH pre-auth key for the VM (it's a new node), and set TS_MAGICDNS_DOMAIN
+#    to your tailnet's MagicDNS base domain in ../.env:
 ../bin/mint-authkey --write-env
 ```
 
 ### If your host egress is TLS-intercepted (corporate SSL-decrypt proxy)
 
-The VM's HTTPS (the tailscale install script, apt) is validated against the web PKI,
-so a corporate MITM proxy will break it unless the VM trusts the corporate root CA.
-Export your host's corporate trust anchors into `tier2/corp-ca.pem` (gitignored) — the
-Vagrantfile ships it into the guest and `provision.sh` installs it automatically:
+The VM's HTTPS (install script, apt) validates against the web PKI, so a corporate MITM
+breaks it unless the VM trusts the corporate root CA. Export your host's trust anchors to
+`tier2/corp-ca.pem` (gitignored); the Vagrantfile ships it in and `provision.sh` installs
+it automatically:
 
 ```sh
-{ security find-certificate -a -p -c "<OrgName>"   /Library/Keychains/System.keychain
-  security find-certificate -a -p -c "goskope"     /Library/Keychains/System.keychain  # if Netskope
-} > tier2/corp-ca.pem
+security find-certificate -a -p -c "<OrgName>" /Library/Keychains/System.keychain > tier2/corp-ca.pem
 ```
 
-(Tailscale's own control/data plane tolerates the MITM via its Noise protocol, so this
-is only needed for the generic HTTPS during provisioning.)
+(Tailscale's own control/data plane tolerates the MITM via Noise, so this is only needed
+for generic HTTPS during provisioning. Detect interception with
+`openssl s_client -connect <host>:443 | openssl x509 -noout -issuer`.)
 
-> The Vagrantfile defaults to the `perk/ubuntu-2204-arm64` box. If `vagrant up`
-> can't fetch it, set another arm64/QEMU box, e.g.
-> `TIER2_BOX=perk/ubuntu-2004-arm64 vagrant up` (or `gyptazy/ubuntu22.04-arm64`).
+> Box: defaults to `perk/ubuntu-2204-arm64`. If `vagrant up` can't fetch it, pick another
+> arm64/QEMU box, e.g. `TIER2_BOX=perk/ubuntu-2004-arm64`.
 
-## Run the probe
+## Bring it up
 
 ```sh
-cd tier2
-vagrant up                  # boots the gateway, joins the tailnet, sets up NAT
-../bin/tier2-probe          # adds the host route, tests reachability, cleans up
+tailgate-tier2 vm-up      # boots, joins the tailnet (MagicDNS on), NAT + dnsmasq
+tailgate-tier2 up         # host route 100.64.0.0/10 -> VM, and /etc/resolver split DNS
 ```
 
-`tier2-probe` discovers the VM's `192.168.105.x` address and a tailnet peer,
-adds `route 100.64.0.0/10 -> VM` (needs `sudo`), then runs ICMP + TCP:22 tests
-to the peer and prints a verdict:
-
-- **ROUTING WORKS** → transparent Tier 2 is viable; the proxy isn't eating CGNAT.
-- **PARTIAL** (ping but no TCP) → firewall/ACL or TCP steering; investigate.
-- **ROUTING BLOCKED** → the corporate proxy is almost certainly intercepting
-  `100.64.0.0/10`; favor the proxy-everywhere path over transparent routing.
-
-The route is removed automatically when the probe exits.
-
-## Teardown
+Then, from the host with no proxy config:
 
 ```sh
-cd tier2 && vagrant destroy -f
+ssh user@somenode.<your-domain>          # resolves via the gateway, routes transparently
+open http://somenode.<your-domain>:PORT  # a normal browser tab
 ```
 
-## Notes / caveats
+Check state any time with `tailgate-tier2 status`. Tear the wiring down with
+`tailgate-tier2 down` (leaves the VM running); destroy the VM with
+`tailgate-tier2 vm-destroy`.
 
-- **IPv4 only.** `socket_vmnet` shared networking is v4; the tailnet v6 range is
-  deferred.
-- **Dynamic IP.** socket_vmnet assigns the guest IP via DHCP, so the probe
-  discovers it rather than pinning it. Real Tier 2 will want a DHCP reservation
-  or a static in-guest address.
-- **Gateway NAT** mirrors the exit-node pattern: `ip_forward` + `MASQUERADE` out
-  `tailscale0` + FORWARD accepts. See `provision.sh`.
+## Caveats
+
+- **Loopback-bound node services still need a forward.** Transparent routing reaches
+  services on a node's *tailnet* IP. A service bound to `127.0.0.1` on the node (e.g. an
+  app gateway UI) is not reachable this way — use `tailgate forward`, `tailscale serve`,
+  or rebind it. (Same as Tier 1.)
+- **Dynamic VM IP.** socket_vmnet assigns the guest IP via DHCP; `tailgate-tier2 up`
+  discovers it rather than pinning it. After a reboot that changes the IP, re-run `up`.
+  A DHCP reservation / static IP and auto-re-wiring on sleep/boot are Tier 3.
+- **IPv4 only.** socket_vmnet shared networking is v4; the tailnet v6 range is deferred.
+- **NAT** mirrors the exit-node pattern: `ip_forward` + `MASQUERADE` out `tailscale0` +
+  FORWARD accepts (see `provision.sh`).

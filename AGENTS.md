@@ -15,9 +15,10 @@ Maturity ladder (see `docs/research-and-design.md` for the full design):
 | 2 | Transparent L3 routing + host-wide MagicDNS via a Vagrant+QEMU gateway VM | 🔬 routing validated; building out |
 | 3 | Polished, auto-managed, near-invisible | 📋 designed |
 
-Layout: `compose.yaml` / `compose.tun.yaml` (Tier 0/1), `bin/tailgate` (CLI),
-`bin/mint-authkey` (Headscale pre-auth key via admin API), `tier2/` (Tier 2 probe),
-`docs/` (design + usage).
+Layout: `compose.yaml` / `compose.tun.yaml` (Tier 0/1), `bin/tailgate` (Tier 0/1 CLI),
+`bin/mint-authkey` (Headscale pre-auth key via admin API), `tier2/` + `bin/tailgate-tier2`
+(Tier 2 gateway VM + host route/resolver wiring; `bin/tier2-probe` is the standalone
+reachability probe), `docs/` (design + usage).
 
 ## Conventions (read before editing)
 

@@ -26,6 +26,22 @@ sudo brew services start socket_vmnet      # privileged daemon via launchd
 ../bin/mint-authkey --write-env
 ```
 
+### If your host egress is TLS-intercepted (corporate SSL-decrypt proxy)
+
+The VM's HTTPS (the tailscale install script, apt) is validated against the web PKI,
+so a corporate MITM proxy will break it unless the VM trusts the corporate root CA.
+Export your host's corporate trust anchors into `tier2/corp-ca.pem` (gitignored) — the
+Vagrantfile ships it into the guest and `provision.sh` installs it automatically:
+
+```sh
+{ security find-certificate -a -p -c "<OrgName>"   /Library/Keychains/System.keychain
+  security find-certificate -a -p -c "goskope"     /Library/Keychains/System.keychain  # if Netskope
+} > tier2/corp-ca.pem
+```
+
+(Tailscale's own control/data plane tolerates the MITM via its Noise protocol, so this
+is only needed for the generic HTTPS during provisioning.)
+
 > The Vagrantfile defaults to the `perk/ubuntu-2204-arm64` box. If `vagrant up`
 > can't fetch it, set another arm64/QEMU box, e.g.
 > `TIER2_BOX=perk/ubuntu-2004-arm64 vagrant up` (or `gyptazy/ubuntu22.04-arm64`).

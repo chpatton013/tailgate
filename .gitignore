@@ -6,3 +6,6 @@
 
 # Vagrant VM state (large disk images, machine-local)
 .vagrant/
+
+# Corporate root CA bundle (machine/tenant-specific; injected into the probe VM)
+tier2/corp-ca.pem

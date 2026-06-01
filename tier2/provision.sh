@@ -13,6 +13,16 @@ set -euxo pipefail
 HOSTNAME_TS="tailgate-gw-probe"
 
 export DEBIAN_FRONTEND=noninteractive
+
+# Trust the corporate root CA(s) if provided, so HTTPS validates through the
+# corporate SSL-decrypt proxy. (Tailscale itself tolerates the MITM via its Noise
+# control protocol, but generic curl/apt require the chain to validate.)
+if [ -f /tmp/corp-ca.pem ]; then
+  csplit -z -s -f /usr/local/share/ca-certificates/corp- -b '%02d.crt' \
+    /tmp/corp-ca.pem '/BEGIN CERTIFICATE/' '{*}' || true
+  update-ca-certificates || true
+fi
+
 curl -fsSL https://tailscale.com/install.sh | sh
 
 echo 'net.ipv4.ip_forward = 1' >/etc/sysctl.d/99-tailgate.conf

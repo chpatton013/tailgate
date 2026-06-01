@@ -329,14 +329,11 @@ changes, with keys that rotate themselves.
    DNS override is present, and a live `/etc/resolver` test was honored by the system
    resolver (`scutil --dns` showed the test domain → its nameserver, Reachable). Host-wide
    split DNS for the tailnet domain will work.
-2. **Corporate all-networks proxy (NEW — now the highest Tier-2 risk; §7.1).** The host
-   runs a corporate SSE / app-proxy network extension configured to capture *all*
-   networks and override the primary interface. DNS *resolution* via `/etc/resolver`
-   should be unaffected, but **traffic to `100.64.0.0/10` may be intercepted/steered by
-   that extension** rather than following our static route to the VM. Tier 1 sidesteps
-   this entirely (host apps talk to `127.0.0.1:1055`, which the extension leaves alone);
-   Tier 2's transparent L3 routing is exactly the case that may be captured. Must be
-   settled by an end-to-end reachability test to a real tailnet IP, not just a lookup.
+2. **Corporate all-networks proxy** — *spiked and CLEARED (§7.1).* The host runs a
+   corporate SSE / app-proxy extension capturing all networks, but the `tier2/` probe
+   confirmed host→`100.64.0.0/10` traffic **is not** intercepted: with a static route to
+   the gateway VM, the host reached a tailnet peer over both ICMP and TCP. Transparent
+   Tier 2 routing is viable on this machine.
 3. **Policy / compliance.** §1.1 — confirmed personal use.
 4. **QEMU host-reachable networking (Apple Silicon)** — *spiked, solved (§7.1):*
    `socket_vmnet` + a vagrant-qemu `qemu_bin` wrapper yields a stable host-reachable
@@ -365,8 +362,18 @@ Two spikes were run on the actual managed laptop (Apple Silicon, macOS 26.x).
   split DNS for the tailnet domain will be applied by the system resolver.
 - **Caveat (separate from DNS):** the host runs a corporate all-networks app-proxy
   network extension (`IncludeAllNetworks`, overrides primary). It doesn't touch DNS
-  resolution, but it is the open question for **routing** to CGNAT space (risk #2) — the
-  `tier2/` probe exists to settle exactly that.
+  resolution, and the routing question it raised is now **settled** — see below.
+
+**Routing through the gateway — PROBE PASSED (the decisive Tier 2 result).**
+- With a host route `100.64.0.0/10 → <gateway VM IP>`, the host reached a real tailnet
+  peer over **both ICMP and TCP:22** (`ttl` decremented through the gateway hop). The
+  corporate all-networks proxy does **not** intercept CGNAT-routed traffic.
+- Also surfaced: the corporate proxy does **blanket TLS interception** of all egress
+  (verified via `openssl s_client` — every host re-signed by the corporate
+  SSL-decrypt CA). Tailscale is unaffected (Noise control plane, WireGuard E2E data), so
+  the tunnel works and stays confidential; only generic HTTPS in the guest needed the
+  corporate root CA installed (handled by `tier2/`). See `CLAUDE.md` for the general rule.
+- **Conclusion: the transparent "just works" endgame is achievable on this machine.**
 
 **QEMU host-reachable IP — SOLVED, needs setup.**
 - Installed: QEMU 10.1.1 (vmnet netdevs compiled in), Vagrant 2.4.9, `vagrant-qemu`

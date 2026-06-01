@@ -13,7 +13,7 @@ This repo targets the `headscale-infra` tailnet (control plane
 | --- | --- | --- |
 | 0 | Tailscale in a container (TUN), operate from inside | ✅ PoC |
 | 1 | Userspace + SOCKS5/HTTP proxy; host `ssh`/`curl`/browser reach the tailnet | ✅ PoC |
-| 2 | Transparent L3 + host-wide MagicDNS via a gateway VM (Vagrant+QEMU) | 📋 designed |
+| 2 | Transparent L3 + host-wide MagicDNS via a gateway VM (Vagrant+QEMU) | 🔬 routing validated; building out |
 | 3 | Polished, auto-managed, near-invisible | 📋 designed |
 
 ## Quick start

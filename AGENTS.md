@@ -112,3 +112,20 @@ reachability probe), `docs/` (design + usage).
 
 11. **Never commit `tier2/.vagrant/`** — it holds multi-hundred-MB VM disk images
     (gitignored). `git add -A` will try to and GitHub will reject the push.
+
+12. **The QEMU VM can wedge after host sleep.** Vagrant still reports it "running"
+    (the qemu process is alive) but the guest stops answering SSH, so anything using
+    `vagrant ssh` (incl. `tailgate-tier2 up`/`status`) fails. Recover with
+    `cd tier2 && vagrant destroy -f && vagrant up` (mint a fresh pre-auth key first if
+    the previous was single-use). Surviving sleep/reboot cleanly is a Tier 3 goal.
+
+## Tier 2 wiring reminders
+
+- `TS_MAGICDNS_DOMAIN` in `.env` must be the **exact** Headscale base domain (often a
+  *private* domain — easy to fumble vs. the public one). Wrong value ⇒ names fall through
+  to public DNS and you get a wildcard IP with `Connection refused` on the service port.
+  The gateway's dnsmasq is domain-agnostic (forwards all to `100.100.100.100`); only the
+  host's `/etc/resolver/<domain>` filename depends on it.
+- `tailgate-tier2 down` removes `/etc/resolver/<current $TS_MAGICDNS_DOMAIN>` — if you
+  change the domain in `.env`, run `down` **before** the change (or remove the stale
+  `/etc/resolver/*` file by hand), else it's orphaned.

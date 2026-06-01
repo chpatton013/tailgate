@@ -41,8 +41,14 @@ cmd_vm_destroy() { ( cd "$TIER2_DIR" && vagrant destroy -f "$@" ); }
 cmd_probe()      { exec "$REPO_ROOT/bin/tier2-probe" "$@"; }
 
 cmd_up() {
-  local gw; gw="$(discover_gw_ip)"
-  [[ -n "$gw" ]] || { err "Could not find the gateway VM IP. Is it up?  tailgate-tier2 vm-up"; exit 1; }
+  # `|| true` so a vagrant-ssh failure doesn't trip set -e before we can explain it.
+  local gw; gw="$(discover_gw_ip || true)"
+  if [[ -z "$gw" ]]; then
+    err "Could not reach the gateway VM over SSH to discover its IP."
+    err "  - If it's not started:   tailgate-tier2 vm-up"
+    err "  - If it's wedged (e.g. after host sleep):  cd tier2 && vagrant destroy -f && vagrant up"
+    exit 1
+  fi
   info "Gateway VM: $gw   MagicDNS domain: $DOMAIN"
 
   info "Adding route $CGNAT -> $gw  (sudo)"

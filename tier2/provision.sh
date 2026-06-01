@@ -76,15 +76,18 @@ iptables -C FORWARD -i "$VMNET_IF" -o tailscale0 -j ACCEPT 2>/dev/null \
 iptables -C FORWARD -i tailscale0 -o "$VMNET_IF" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null \
   || iptables -A FORWARD -i tailscale0 -o "$VMNET_IF" -m state --state RELATED,ESTABLISHED -j ACCEPT
 
-# --- DNS forwarder for the tailnet domain ------------------------------------
-# Listen on the vmnet NIC and forward the MagicDNS domain to tailscaled's
-# resolver. bind-dynamic follows the interface's address across reboots; the
-# host's /etc/resolver scopes only this domain to us, so no-resolv is safe.
+# --- DNS forwarder ------------------------------------------------------------
+# Listen on the vmnet NIC and forward EVERYTHING to tailscaled's MagicDNS
+# resolver. We deliberately don't scope by domain here: the host's
+# /etc/resolver/<domain> file already decides which queries reach this VM, so the
+# gateway needn't know the tailnet domain (avoids a host/VM domain-mismatch bug).
+# MagicDNS itself answers tailnet names and forwards the rest to the tailnet's
+# global nameservers. bind-dynamic follows the interface address across reboots.
 cat >/etc/dnsmasq.d/tailgate.conf <<EOF
 interface=${VMNET_IF}
 bind-dynamic
 no-resolv
-server=/${TS_MAGICDNS_DOMAIN}/${MAGICDNS_RESOLVER}
+server=${MAGICDNS_RESOLVER}
 EOF
 systemctl enable dnsmasq
 systemctl restart dnsmasq

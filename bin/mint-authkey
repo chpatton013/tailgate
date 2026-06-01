@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+"""Mint a Headscale pre-auth key for the tailgate node.
+
+Mirrors the headscale-infra `headscale_exit_node_preauthkey` Lambda: it pulls the
+admin API key from AWS Secrets Manager, ensures the user exists, and creates a
+pre-auth key via the Headscale 0.26 REST API.
+
+Usage:
+    bin/mint-authkey                 # print a fresh key
+    bin/mint-authkey --write-env     # also write it into ./.env as TS_AUTHKEY
+    bin/mint-authkey --reusable --ephemeral --expiry-days 30
+
+Config is read from .env (or the environment):
+    HEADSCALE_USER              (default: user)
+    TS_LOGIN_SERVER             (default: https://headscale.example.com)
+    HEADSCALE_ADMIN_KEY_SECRET  (default: headscale/admin-api-key)
+    AWS_PROFILE / AWS_REGION    (optional; passed through to the aws CLI)
+
+Requires: python3, and the `aws` CLI configured with access to the secret.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+ENV_FILE = REPO_ROOT / ".env"
+
+
+def load_dotenv(path: Path) -> dict[str, str]:
+    """Minimal .env reader (KEY=VALUE lines); does not mutate os.environ."""
+    values: dict[str, str] = {}
+    if not path.exists():
+        return values
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        values[key.strip()] = val.strip()
+    return values
+
+
+def cfg(dotenv: dict[str, str], key: str, default: str) -> str:
+    return os.environ.get(key) or dotenv.get(key) or default
+
+
+def die(msg: str) -> None:
+    print(f"mint-authkey: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def get_admin_key(secret_id: str) -> str:
+    """Fetch the admin API key from Secrets Manager via the aws CLI."""
+    cmd = [
+        "aws", "secretsmanager", "get-secret-value",
+        "--secret-id", secret_id,
+        "--query", "SecretString", "--output", "text",
+    ]
+    if os.environ.get("AWS_PROFILE"):
+        cmd += ["--profile", os.environ["AWS_PROFILE"]]
+    if os.environ.get("AWS_REGION"):
+        cmd += ["--region", os.environ["AWS_REGION"]]
+    try:
+        raw = subprocess.run(
+            cmd, check=True, capture_output=True, text=True
+        ).stdout.strip()
+    except FileNotFoundError:
+        die("the `aws` CLI is not installed or not on PATH.")
+    except subprocess.CalledProcessError as e:
+        die(f"failed to read secret '{secret_id}':\n{e.stderr.strip()}")
+    try:
+        return json.loads(raw)["secret"]
+    except (json.JSONDecodeError, KeyError):
+        die(f"secret '{secret_id}' is not JSON of the form {{\"secret\": \"...\"}}")
+    return ""  # unreachable
+
+
+def api(base_url: str, method: str, path: str, key: str, body=None):
+    url = f"{base_url}/api/v1/{path}"
+    data = json.dumps(body).encode() if body else None
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Authorization", f"Bearer {key}")
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        try:
+            return json.loads(e.read())
+        except json.JSONDecodeError:
+            die(f"{method} {path} -> HTTP {e.code}")
+    except urllib.error.URLError as e:
+        die(f"cannot reach {url}: {e.reason}")
+
+
+def ensure_user(base_url: str, key: str, name: str) -> str:
+    """Create the user if absent; return its numeric id."""
+    result = api(base_url, "POST", "user", key, {"name": name})
+    if "user" in result:
+        return result["user"]["id"]
+    users = api(base_url, "GET", "user", key)
+    for u in users.get("users", []):
+        if u["name"] == name:
+            return u["id"]
+    die(f"could not find or create user '{name}': {result}")
+    return ""  # unreachable
+
+
+def create_preauthkey(
+    base_url: str, key: str, user_id: str, reusable: bool, ephemeral: bool, days: int
+) -> str:
+    expiry = time.strftime(
+        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + days * 86400)
+    )
+    result = api(
+        base_url, "POST", "preauthkey", key,
+        {"user": user_id, "reusable": reusable, "ephemeral": ephemeral,
+         "expiration": expiry},
+    )
+    pak = result.get("preAuthKey", {}).get("key")
+    if not pak:
+        die(f"failed to create preauthkey: {result}")
+    return pak
+
+
+def write_env(authkey: str) -> None:
+    """Set TS_AUTHKEY=<authkey> in ./.env, creating it from .env.example if needed."""
+    if not ENV_FILE.exists():
+        example = REPO_ROOT / ".env.example"
+        if example.exists():
+            ENV_FILE.write_text(example.read_text())
+        else:
+            ENV_FILE.write_text("TS_AUTHKEY=\n")
+    lines = ENV_FILE.read_text().splitlines()
+    out, replaced = [], False
+    for line in lines:
+        if line.strip().startswith("TS_AUTHKEY="):
+            out.append(f"TS_AUTHKEY={authkey}")
+            replaced = True
+        else:
+            out.append(line)
+    if not replaced:
+        out.append(f"TS_AUTHKEY={authkey}")
+    ENV_FILE.write_text("\n".join(out) + "\n")
+    print(f"Wrote TS_AUTHKEY to {ENV_FILE}", file=sys.stderr)
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(description="Mint a Headscale pre-auth key.")
+    p.add_argument("--reusable", action="store_true", help="key can register multiple nodes")
+    p.add_argument("--ephemeral", action="store_true", help="nodes auto-remove when offline")
+    p.add_argument("--expiry-days", type=int, default=90, help="key validity (default 90)")
+    p.add_argument("--write-env", action="store_true", help="write TS_AUTHKEY into ./.env")
+    args = p.parse_args()
+
+    dotenv = load_dotenv(ENV_FILE)
+    user = cfg(dotenv, "HEADSCALE_USER", "user")
+    base_url = cfg(dotenv, "TS_LOGIN_SERVER", "https://headscale.example.com").rstrip("/")
+    secret_id = cfg(dotenv, "HEADSCALE_ADMIN_KEY_SECRET", "headscale/admin-api-key")
+    # Surface AWS_PROFILE/REGION from .env into the env the aws CLI sees.
+    for k in ("AWS_PROFILE", "AWS_REGION"):
+        if k not in os.environ and dotenv.get(k):
+            os.environ[k] = dotenv[k]
+
+    admin_key = get_admin_key(secret_id)
+    user_id = ensure_user(base_url, admin_key, user)
+    authkey = create_preauthkey(
+        base_url, admin_key, user_id, args.reusable, args.ephemeral, args.expiry_days
+    )
+
+    if args.write_env:
+        write_env(authkey)
+    else:
+        # Key to stdout (pipeable), human notes to stderr.
+        print(f"Minted pre-auth key for user '{user}' (expires in {args.expiry_days}d).",
+              file=sys.stderr)
+        print(authkey)
+
+
+if __name__ == "__main__":
+    main()

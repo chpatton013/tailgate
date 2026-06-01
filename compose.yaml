@@ -1,0 +1,48 @@
+# Tailgate — Tier 1 (default): Tailscale client in userspace mode, exposing a
+# SOCKS5 + HTTP proxy to the host so host-side tools (ssh/curl/browser) can reach
+# the tailnet without a VPN client on the host.
+#
+#   docker compose up -d           # start
+#   docker compose logs -f         # watch registration
+#   docker compose exec tailscale tailscale status
+#
+# For Tier 0 (TUN mode, operate from inside the container) layer the override:
+#   docker compose -f compose.yaml -f compose.tun.yaml up -d
+#
+# Config comes from .env (copy .env.example -> .env first).
+
+services:
+  tailscale:
+    image: tailscale/tailscale:${TS_IMAGE_TAG:-stable}
+    container_name: tailgate
+    hostname: ${TS_HOSTNAME:-tailgate-laptop}
+    # Join Docker's existing default bridge instead of creating a dedicated
+    # network. tailgate only needs outbound access + loopback-published ports,
+    # and this host's daemon scopes default-address-pools to a single /24 that
+    # the default bridge already consumes — so a per-project network can't be
+    # allocated ("address pools have been fully subnetted").
+    network_mode: bridge
+    environment:
+      # --- identity / control plane ---
+      TS_AUTHKEY: "${TS_AUTHKEY:?set TS_AUTHKEY in .env — run bin/mint-authkey}"
+      TS_HOSTNAME: "${TS_HOSTNAME:-tailgate-laptop}"
+      TS_EXTRA_ARGS: "--login-server=${TS_LOGIN_SERVER:-https://headscale.example.com} ${TS_UP_EXTRA_ARGS:-}"
+      TS_STATE_DIR: /var/lib/tailscale
+      # --- Tier 1: userspace + proxy ---
+      # SOCKS5 (any TCP) and HTTP proxy. They CAN share one port, but we keep
+      # them separate for predictability: 1055 = SOCKS5, 1056 = HTTP.
+      TS_USERSPACE: "true"
+      TS_SOCKS5_SERVER: 0.0.0.0:1055
+      TS_OUTBOUND_HTTP_PROXY_LISTEN: 0.0.0.0:1056
+      TS_ENABLE_HEALTH_CHECK: "true"
+    volumes:
+      # Persist node identity across rebuilds so Headplane doesn't churn.
+      - tailscale-state:/var/lib/tailscale
+    ports:
+      # Bound to loopback only — the proxy must never be reachable off-host.
+      - "127.0.0.1:${TS_SOCKS5_PORT:-1055}:1055"
+      - "127.0.0.1:${TS_HTTP_PROXY_PORT:-1056}:1056"
+    restart: unless-stopped
+
+volumes:
+  tailscale-state:

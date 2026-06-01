@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+# tailgate — drive the Tailscale-in-a-container PoC and reach the tailnet from the host.
+#
+#   tailgate up [--tun]     start the client (default: Tier 1 userspace+proxy; --tun: Tier 0)
+#   tailgate down           stop and remove the container
+#   tailgate status         tailscale status (from inside the container)
+#   tailgate ip             this node's tailnet IP(s)
+#   tailgate logs           follow container logs
+#   tailgate ssh <host> ... ssh to a tailnet node through the SOCKS5 proxy
+#   tailgate curl <args>    curl through the SOCKS5 proxy (remote DNS = MagicDNS works)
+#   tailgate forward [user@]host <rport> [lport] [ssh args]   forward a node's loopback port
+#   tailgate proxy          print proxy addresses + shell export hints
+#   tailgate doctor         diagnose the setup end to end
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT"
+
+# Load .env (for proxy ports / login server) without clobbering the real env.
+SOCKS5_PORT=1055
+HTTP_PROXY_PORT=1056
+LOGIN_SERVER="https://headscale.example.com"
+if [[ -f .env ]]; then
+  # shellcheck disable=SC1091
+  set -a; source ./.env; set +a
+  SOCKS5_PORT="${TS_SOCKS5_PORT:-$SOCKS5_PORT}"
+  HTTP_PROXY_PORT="${TS_HTTP_PROXY_PORT:-$HTTP_PROXY_PORT}"
+  LOGIN_SERVER="${TS_LOGIN_SERVER:-$LOGIN_SERVER}"
+fi
+SOCKS5_ADDR="127.0.0.1:${SOCKS5_PORT}"
+
+err()  { printf '\033[31m%s\033[0m\n' "$*" >&2; }
+ok()   { printf '\033[32m%s\033[0m\n' "$*"; }
+info() { printf '%s\n' "$*"; }
+
+compose() { docker compose "$@"; }
+
+require_env() {
+  if [[ ! -f .env ]]; then
+    err "No .env found. Run:  cp .env.example .env  &&  ./bin/mint-authkey --write-env"
+    exit 1
+  fi
+  if ! grep -qE '^TS_AUTHKEY=.+' .env; then
+    err "TS_AUTHKEY is empty in .env. Run:  ./bin/mint-authkey --write-env"
+    exit 1
+  fi
+}
+
+cmd_up() {
+  require_env
+  if [[ "${1:-}" == "--tun" ]]; then
+    info "Starting Tier 0 (TUN mode) — operate from inside: tailgate status / ssh / curl"
+    compose -f compose.yaml -f compose.tun.yaml up -d
+  else
+    info "Starting Tier 1 (userspace + SOCKS5 ${SOCKS5_ADDR})"
+    compose up -d
+  fi
+  info "Watch registration with:  tailgate logs    (Ctrl-C to stop watching)"
+}
+
+cmd_down()   { compose down "$@"; }
+cmd_logs()   { compose logs -f tailscale; }
+cmd_status() { compose exec tailscale tailscale status "$@"; }
+cmd_ip()     { compose exec tailscale tailscale ip "$@"; }
+
+cmd_ssh() {
+  if [[ $# -lt 1 ]]; then err "usage: tailgate ssh <host> [ssh args...]"; exit 1; fi
+  # nc -X 5 -x <proxy> performs SOCKS5; the hostname is resolved at the proxy,
+  # so MagicDNS names (*.ts.example.com) work. If your nc resolves locally,
+  # pass the 100.x address instead.
+  ssh -o ProxyCommand="nc -X 5 -x ${SOCKS5_ADDR} %h %p" "$@"
+}
+
+cmd_curl() {
+  curl --proxy "socks5h://${SOCKS5_ADDR}" "$@"
+}
+
+cmd_forward() {
+  # Forward a tailnet node's loopback-bound port to the host, tunneled through
+  # the SOCKS5 proxy. For services that bind to 127.0.0.1 on the node (e.g.
+  # myhost's gateway on 8000) and so aren't reachable over the tailnet directly.
+  #
+  # Host is [user@]host, exactly like ssh: a bare alias resolves via ~/.ssh/config,
+  # or give user@host plus any ssh flags (e.g. -i key) and need no config at all.
+  #
+  #   tailgate forward myhost 8000
+  #   tailgate forward user@myhost.ts.example.com 8000 -i ~/.ssh/id_ed25519
+  #   tailgate forward myhost 8000 28789 -i ~/.ssh/key   # local port 28789
+  if [[ $# -lt 2 ]]; then
+    err "usage: tailgate forward [user@]host <remote-port> [local-port] [ssh args...]"; exit 1
+  fi
+  local host="$1"; shift
+  local rport="$1"; shift
+  if ! [[ "$rport" =~ ^[0-9]+$ ]]; then
+    err "remote-port must be numeric (got '$rport')"; exit 1
+  fi
+  local lport="$rport"
+  # An optional numeric next arg is the local port; anything starting with '-'
+  # (or non-numeric) is left for ssh.
+  if [[ "${1:-}" =~ ^[0-9]+$ ]]; then lport="$1"; shift; fi
+  info "Forwarding http://localhost:${lport}  ->  ${host}:127.0.0.1:${rport}  (Ctrl-C to stop)"
+  # Remaining "$@" are passthrough ssh args; host goes last.
+  ssh -N -o ExitOnForwardFailure=yes \
+    -o ProxyCommand="nc -X 5 -x ${SOCKS5_ADDR} %h %p" \
+    -L "${lport}:127.0.0.1:${rport}" "$@" "$host"
+}
+
+cmd_proxy() {
+  cat <<EOF
+SOCKS5 proxy : socks5h://${SOCKS5_ADDR}
+HTTP proxy   : http://127.0.0.1:${HTTP_PROXY_PORT}
+
+Shell (curl, git, etc. — remote DNS via SOCKS):
+  export ALL_PROXY=socks5h://${SOCKS5_ADDR}
+  export HTTPS_PROXY=http://127.0.0.1:${HTTP_PROXY_PORT}
+
+Browser (Firefox profile): SOCKS5 host 127.0.0.1 port ${SOCKS5_PORT},
+  and enable "Proxy DNS when using SOCKS v5".
+
+SSH (~/.ssh/config):
+  Host *.ts.example.com 100.64.*
+    ProxyCommand nc -X 5 -x ${SOCKS5_ADDR} %h %p
+EOF
+}
+
+cmd_doctor() {
+  local fail=0
+  command -v docker >/dev/null && ok "✓ docker present" || { err "✗ docker not found"; fail=1; }
+  if [[ -f .env ]] && grep -qE '^TS_AUTHKEY=.+' .env; then ok "✓ .env has TS_AUTHKEY"
+  else err "✗ .env missing or TS_AUTHKEY empty"; fail=1; fi
+
+  if docker ps --format '{{.Names}}' | grep -qx tailgate; then
+    ok "✓ container 'tailgate' running"
+  else
+    err "✗ container not running (try: tailgate up)"; fail=1
+  fi
+
+  if docker ps --format '{{.Names}}' | grep -qx tailgate; then
+    if compose exec -T tailscale tailscale status >/dev/null 2>&1; then
+      ok "✓ node registered to ${LOGIN_SERVER}"
+      compose exec -T tailscale tailscale ip 2>/dev/null | sed 's/^/    ip: /' || true
+    else
+      err "✗ tailscale not registered yet (check: tailgate logs)"; fail=1
+    fi
+  fi
+
+  # Proxy reachable from the host? (skip in TUN mode where it's not exposed)
+  if nc -z 127.0.0.1 "${SOCKS5_PORT}" 2>/dev/null; then
+    ok "✓ SOCKS5 proxy reachable on ${SOCKS5_ADDR}"
+  else
+    info "· SOCKS5 proxy not reachable on ${SOCKS5_ADDR} (expected in --tun mode)"
+  fi
+
+  [[ $fail -eq 0 ]] && ok "doctor: all good" || { err "doctor: problems found"; return 1; }
+}
+
+usage() { sed -n '2,13p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+
+main() {
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    up)      cmd_up "$@";;
+    down)    cmd_down "$@";;
+    status)  cmd_status "$@";;
+    ip)      cmd_ip "$@";;
+    logs)    cmd_logs "$@";;
+    ssh)     cmd_ssh "$@";;
+    curl)    cmd_curl "$@";;
+    forward) cmd_forward "$@";;
+    proxy)   cmd_proxy "$@";;
+    doctor)  cmd_doctor "$@";;
+    ""|-h|--help|help) usage;;
+    *) err "unknown command: $sub"; usage; exit 1;;
+  esac
+}
+
+main "$@"

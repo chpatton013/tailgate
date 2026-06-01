@@ -1,0 +1,24 @@
+# Tailgate — Tier 0 override: run tailscaled in kernel/TUN mode.
+#
+# Layer on top of compose.yaml:
+#   docker compose -f compose.yaml -f compose.tun.yaml up -d
+#
+# In TUN mode the container gets a real tailscale0 interface and MagicDNS
+# (100.100.100.100), so you operate FROM INSIDE the container:
+#   docker compose exec tailscale tailscale status
+#   docker compose exec tailscale ssh user@node.ts.example.com
+#   docker compose exec tailscale curl https://app.ts.example.com
+#
+# The SOCKS5/HTTP proxy env from compose.yaml is ignored in TUN mode (harmless).
+# This tier exists purely to validate the auth flow end-to-end and is the
+# foundation the Tier 2 gateway VM builds on.
+
+services:
+  tailscale:
+    environment:
+      TS_USERSPACE: "false"
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun:/dev/net/tun

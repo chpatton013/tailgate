@@ -325,23 +325,70 @@ changes, with keys that rotate themselves.
 
 ## 7. Key risks & open questions
 
-1. **MDM vs `/etc/resolver` (highest risk).** A managed-profile DNS setting can override
-   `/etc/resolver/ts.example.com`, breaking host-wide MagicDNS (Tier 2+). **Validate
-   early.** Fallbacks: explicit per-browser DNS, a PAC file, or staying on the Tier-1
-   `socks5h` model for name resolution while still using Tier-2 routing for raw IPs.
-2. **Policy / compliance.** §1.1 — confirm this is permitted on the managed device.
-3. **QEMU host-reachable networking (Apple Silicon).** Resolved direction: Vagrant+QEMU.
-   Open sub-question: get a stable host-reachable guest IP via vmnet bridged networking,
-   or fall back to QEMU `hostfwd` port-forwards. Spike this before building Tier 2 (§4).
-4. **Route persistence on macOS.** Manually added routes are dropped on sleep/network
+1. **MDM vs `/etc/resolver`** — *spiked, largely cleared (§7.1).* No managed-profile DNS
+   override is present on this host, so `/etc/resolver/<tailnet-domain>` split DNS should
+   be honored. One reversible sudo confirmation test still outstanding.
+2. **Corporate all-networks proxy (NEW — now the highest Tier-2 risk; §7.1).** The host
+   runs a corporate SSE / app-proxy network extension configured to capture *all*
+   networks and override the primary interface. DNS *resolution* via `/etc/resolver`
+   should be unaffected, but **traffic to `100.64.0.0/10` may be intercepted/steered by
+   that extension** rather than following our static route to the VM. Tier 1 sidesteps
+   this entirely (host apps talk to `127.0.0.1:1055`, which the extension leaves alone);
+   Tier 2's transparent L3 routing is exactly the case that may be captured. Must be
+   settled by an end-to-end reachability test to a real tailnet IP, not just a lookup.
+3. **Policy / compliance.** §1.1 — confirmed personal use.
+4. **QEMU host-reachable networking (Apple Silicon)** — *spiked, solved (§7.1):*
+   `socket_vmnet` + a vagrant-qemu `qemu_bin` wrapper yields a stable host-reachable
+   guest IP (`192.168.105.x`), preserving the route + `/etc/resolver` model. Requires a
+   one-time install + a Vagrant plugin repair.
+5. **Route persistence on macOS.** Manually added routes are dropped on sleep/network
    change; Tier 3's LaunchDaemon watchdog is what makes this robust.
-5. **NAT return path.** Confirm host-subnet → `tailscale0` masquerade works for *all*
+6. **NAT return path.** Confirm host-subnet → `tailscale0` masquerade works for *all*
    target nodes (the `exit-node` rules are the proven template).
-6. **DERP / connectivity.** The tailnet uses Tailscale's default DERP map
+7. **DERP / connectivity.** The tailnet uses Tailscale's default DERP map
    (`HEADSCALE_DERP_SERVER_ENABLED=false`); ensure the VM's egress can reach DERP and
    `controlplane.tailscale.com` for relay when direct connections fail.
-7. **State & identity.** Decide ephemeral vs persistent node identity; persistent
+8. **State & identity.** Decide ephemeral vs persistent node identity; persistent
    `TS_STATE_DIR` avoids churn in Headplane.
+
+### 7.1 Tier 2 spike results (2026-06-01)
+
+Two spikes were run on the actual managed laptop (Apple Silicon, macOS 26.x).
+
+**DNS / split-DNS feasibility — CONDITIONAL (config layer works).**
+- No MDM/profile DNS override exists (no `com.apple.dnsProxy` / `com.apple.dnsSettings`
+  payload, no profile-scoped resolver, clean `scutil --dns`). The classic
+  Config-Profile-outranks-`/etc/resolver` failure mode is **absent** here.
+- **However**, the host runs a corporate all-networks app-proxy network extension
+  (`IncludeAllNetworks`, overrides primary). This doesn't touch DNS resolution but is the
+  open question for **routing** to CGNAT space (risk #2).
+- Outstanding (needs a real terminal with sudo; fully reversible):
+  ```sh
+  sudo mkdir -p /etc/resolver
+  echo "nameserver 9.9.9.9" | sudo tee /etc/resolver/tailgate-spike
+  scutil --dns | grep -A3 tailgate-spike        # expect domain tailgate-spike → 9.9.9.9
+  dscacheutil -q host -a name test.tailgate-spike
+  sudo rm /etc/resolver/tailgate-spike           # cleanup
+  ```
+  If the resolver appears in `scutil --dns`, host-wide split DNS is confirmed.
+
+**QEMU host-reachable IP — SOLVED, needs setup.**
+- Installed: QEMU 10.1.1 (vmnet netdevs compiled in), Vagrant 2.4.9, `vagrant-qemu`
+  0.3.6. Missing: `socket_vmnet`. Blocker: `vagrant plugin list` currently fails (a
+  stale `vagrant-cachier` pin) and must be repaired first.
+- Recommended path (preserves the route + resolver design): **`socket_vmnet` + a
+  vagrant-qemu `qemu_bin` wrapper** → guest on `192.168.105.x`, host-routable; the
+  privileged daemon runs as root via launchd while QEMU stays rootless (the same pattern
+  Lima/Colima/minikube use). Native `-netdev vmnet-shared` also works but needs the whole
+  QEMU process to run as root — worse IaC. SLIRP+`hostfwd` is the no-install fallback but
+  forces a redesign (no L3 route; `/etc/resolver` → `127.0.0.1:<fwd>` only).
+- IPv6 (`fd7a:115c:a1e0::/48`): treat **IPv4-only as the pragmatic target**; defer v6.
+- One-time setup commands:
+  ```sh
+  vagrant plugin expunge --reinstall          # repair the broken plugin state first
+  brew install socket_vmnet
+  sudo brew services start socket_vmnet        # root daemon via launchd
+  ```
 
 ---
 
@@ -351,11 +398,12 @@ changes, with keys that rotate themselves.
    reachability from inside. (Hours.)
 2. **Tier 1 on Docker** — flip to userspace + SOCKS5, wire up `ssh`/`curl`/a browser
    profile. Ship this as the usable PoC. (Hours.)
-3. **Spike two questions** on the real managed laptop before investing in Tier 2
-   (critical de-risking): (a) MDM vs `/etc/resolver`, and (b) Vagrant+QEMU vmnet
-   host-reachable IP vs `hostfwd`.
-4. **Tier 2 on Vagrant+QEMU** — host-reachable VM IP, TUN gateway, host route +
-   resolver. (A day or two.)
+3. **Spike two questions** — *done (§7.1):* DNS split is clear at the config layer;
+   QEMU host-reachable IP is solved via `socket_vmnet`. New blocker surfaced: a corporate
+   all-networks proxy may intercept CGNAT routing (risk #2) — settle with an end-to-end
+   reachability probe before committing to the transparent model.
+4. **Tier 2 on Vagrant+QEMU** — `socket_vmnet` networking, TUN gateway, host route +
+   `/etc/resolver`. Gate on the routing-vs-proxy reachability test. (A day or two.)
 5. **Tier 3** — LaunchAgent lifecycle, route/resolver watchdog, automated key minting
    (reuse the `headscale-infra` preauthkey Lambda pattern), `tailgate` CLI. (Iterative.)
 

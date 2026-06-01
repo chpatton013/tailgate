@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# Tier 2 routing probe (host side). Adds a temporary route for 100.64.0.0/10 via
+# the gateway VM, then tests whether the host can actually reach a tailnet peer.
+# This answers the open question: does the corporate all-networks proxy let
+# CGNAT-routed traffic through, or intercept it?
+#
+# Requires: the gateway VM up (cd tier2 && vagrant up). Uses sudo for `route`.
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TIER2_DIR="$REPO_ROOT/tier2"
+CGNAT="100.64.0.0/10"
+
+err() { printf '\033[31m%s\033[0m\n' "$*" >&2; }
+ok()  { printf '\033[32m%s\033[0m\n' "$*"; }
+
+cd "$TIER2_DIR"
+
+echo "Discovering gateway VM address + a tailnet peer to test…"
+GW_IP="$(vagrant ssh -c "ip -4 addr show | awk '/192\\.168\\.105\\./{print \$2}' | cut -d/ -f1" 2>/dev/null | tr -d '\r' | head -1)"
+[[ -n "$GW_IP" ]] || { err "Could not find the gateway's 192.168.105.x IP. Is the VM up (vagrant status)?"; exit 1; }
+
+# First peer that isn't the gateway itself, from the VM's tailscale view.
+PEER_IP="$(vagrant ssh -c "tailscale status 2>/dev/null | grep -v tailgate-gw-probe | awk '/^100\\./{print \$1; exit}'" 2>/dev/null | tr -d '\r' | head -1)"
+[[ -n "$PEER_IP" ]] || { err "No tailnet peer found via the VM. Check: cd tier2 && vagrant ssh -c 'tailscale status'"; exit 1; }
+
+echo "  gateway VM : $GW_IP"
+echo "  test peer  : $PEER_IP"
+echo
+
+cleanup() { sudo route -n delete -net "$CGNAT" "$GW_IP" >/dev/null 2>&1 || true; }
+trap cleanup EXIT
+
+echo "Adding host route: $CGNAT -> $GW_IP  (needs sudo)"
+sudo route -n add -net "$CGNAT" "$GW_IP"
+
+echo
+echo "=== Test 1: ICMP to peer $PEER_IP (3 pings) ==="
+PING_OK=no
+if ping -c 3 -t 5 "$PEER_IP"; then PING_OK=yes; fi
+
+echo
+echo "=== Test 2: TCP connect to peer $PEER_IP:22 (SSH) ==="
+TCP_OK=no
+if nc -vz -G 5 "$PEER_IP" 22; then TCP_OK=yes; fi
+
+echo
+echo "================= VERDICT ================="
+if [[ "$TCP_OK" == yes ]]; then
+  ok  "ROUTING WORKS — host reached the tailnet through the VM (TCP ok, ping=$PING_OK)."
+  ok  "The corporate proxy is NOT eating CGNAT-routed traffic. Tier 2 transparent routing is viable."
+elif [[ "$PING_OK" == yes ]]; then
+  err "PARTIAL — ICMP reached the peer but TCP:22 did not. Likely a firewall/ACL or the"
+  err "proxy steering TCP. Investigate before committing to transparent routing."
+else
+  err "ROUTING BLOCKED — neither ICMP nor TCP reached the peer through the VM route."
+  err "Most likely the all-networks corporate proxy is intercepting 100.64.0.0/10."
+  err "Tier 2 transparent L3 is probably not viable here; favor the proxy-everywhere path."
+fi
+echo "(route cleaned up automatically)"

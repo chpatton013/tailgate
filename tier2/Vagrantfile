@@ -1,0 +1,70 @@
+# Tier 2 routing probe — a QEMU + socket_vmnet Linux VM acting as a Tailscale
+# gateway. Its only job (for now) is to answer one question: with a host route
+# for 100.64.0.0/10 pointing at this VM, can the host actually reach the tailnet,
+# or does the corporate all-networks proxy intercept CGNAT-range traffic?
+#
+# Prereqs (run once — see tier2/README.md):
+#   vagrant plugin expunge --reinstall
+#   brew install socket_vmnet
+#   sudo brew services start socket_vmnet
+#
+# Config is read from ../.env: TS_AUTHKEY (mint a fresh one — single-use keys are
+# consumed by the Tier 1 container) and TS_LOGIN_SERVER.
+#
+#   cd tier2 && vagrant up && ../bin/tier2-probe
+
+# --- load ../.env (no plugins; simple KEY=VALUE parse) -----------------------
+env = {}
+env_file = File.expand_path("../.env", __dir__)
+if File.exist?(env_file)
+  File.readlines(env_file).each do |line|
+    line = line.strip
+    next if line.empty? || line.start_with?("#") || !line.include?("=")
+    k, _, v = line.partition("=")
+    env[k.strip] = v.strip
+  end
+end
+
+authkey      = ENV["TS_AUTHKEY"]      || env["TS_AUTHKEY"]      || ""
+login_server = ENV["TS_LOGIN_SERVER"] || env["TS_LOGIN_SERVER"] || "https://headscale.example.com"
+box          = ENV["TIER2_BOX"]       || env["TIER2_BOX"]       || "perk/ubuntu-2204-arm64"
+
+if authkey.empty?
+  warn "tier2: TS_AUTHKEY is empty in ../.env — mint a fresh key: ../bin/mint-authkey --write-env"
+end
+
+# Homebrew prefix on Apple Silicon.
+brew    = "/opt/homebrew"
+qemu_bin = "#{brew}/bin/qemu-system-aarch64"
+vmnet_client = "#{brew}/opt/socket_vmnet/bin/socket_vmnet_client"
+vmnet_socket = "#{brew}/var/run/socket_vmnet"
+
+Vagrant.configure("2") do |config|
+  config.vm.box      = box
+  config.vm.hostname = "tailgate-gw-probe"
+  config.vm.synced_folder ".", "/vagrant", disabled: true
+
+  config.vm.provider "qemu" do |qe|
+    qe.arch    = "aarch64"
+    qe.machine = "virt,accel=hvf,highmem=on"
+    qe.cpu     = "host"
+    qe.smp     = "2"
+    qe.memory  = "1024"
+    # Replace vagrant-qemu's default user-mode NIC with a socket_vmnet-backed
+    # one so the guest gets a host-reachable 192.168.105.x address.
+    qe.net_device = nil
+    qe.qemu_bin   = [vmnet_client, vmnet_socket, qemu_bin]
+    qe.extra_qemu_args = %w[
+      -device virtio-net-pci,netdev=net0,mac=52:54:00:12:34:60
+      -netdev socket,id=net0,fd=3
+    ]
+  end
+
+  config.vm.provision "shell" do |s|
+    s.path = "provision.sh"
+    s.env  = {
+      "TS_AUTHKEY"      => authkey,
+      "TS_LOGIN_SERVER" => login_server,
+    }
+  end
+end

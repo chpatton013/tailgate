@@ -325,9 +325,10 @@ changes, with keys that rotate themselves.
 
 ## 7. Key risks & open questions
 
-1. **MDM vs `/etc/resolver`** — *spiked, largely cleared (§7.1).* No managed-profile DNS
-   override is present on this host, so `/etc/resolver/<tailnet-domain>` split DNS should
-   be honored. One reversible sudo confirmation test still outstanding.
+1. **MDM vs `/etc/resolver`** — *spiked and CONFIRMED working (§7.1).* No managed-profile
+   DNS override is present, and a live `/etc/resolver` test was honored by the system
+   resolver (`scutil --dns` showed the test domain → its nameserver, Reachable). Host-wide
+   split DNS for the tailnet domain will work.
 2. **Corporate all-networks proxy (NEW — now the highest Tier-2 risk; §7.1).** The host
    runs a corporate SSE / app-proxy network extension configured to capture *all*
    networks and override the primary interface. DNS *resolution* via `/etc/resolver`
@@ -355,22 +356,17 @@ changes, with keys that rotate themselves.
 
 Two spikes were run on the actual managed laptop (Apple Silicon, macOS 26.x).
 
-**DNS / split-DNS feasibility — CONDITIONAL (config layer works).**
+**DNS / split-DNS feasibility — CONFIRMED working.**
 - No MDM/profile DNS override exists (no `com.apple.dnsProxy` / `com.apple.dnsSettings`
   payload, no profile-scoped resolver, clean `scutil --dns`). The classic
   Config-Profile-outranks-`/etc/resolver` failure mode is **absent** here.
-- **However**, the host runs a corporate all-networks app-proxy network extension
-  (`IncludeAllNetworks`, overrides primary). This doesn't touch DNS resolution but is the
-  open question for **routing** to CGNAT space (risk #2).
-- Outstanding (needs a real terminal with sudo; fully reversible):
-  ```sh
-  sudo mkdir -p /etc/resolver
-  echo "nameserver 9.9.9.9" | sudo tee /etc/resolver/tailgate-spike
-  scutil --dns | grep -A3 tailgate-spike        # expect domain tailgate-spike → 9.9.9.9
-  dscacheutil -q host -a name test.tailgate-spike
-  sudo rm /etc/resolver/tailgate-spike           # cleanup
-  ```
-  If the resolver appears in `scutil --dns`, host-wide split DNS is confirmed.
+- The live test was honored: `/etc/resolver/tailgate-spike` → `nameserver 9.9.9.9`
+  appeared in `scutil --dns` (domain `tailgate-spike`, Reachable). So `/etc/resolver`
+  split DNS for the tailnet domain will be applied by the system resolver.
+- **Caveat (separate from DNS):** the host runs a corporate all-networks app-proxy
+  network extension (`IncludeAllNetworks`, overrides primary). It doesn't touch DNS
+  resolution, but it is the open question for **routing** to CGNAT space (risk #2) — the
+  `tier2/` probe exists to settle exactly that.
 
 **QEMU host-reachable IP — SOLVED, needs setup.**
 - Installed: QEMU 10.1.1 (vmnet netdevs compiled in), Vagrant 2.4.9, `vagrant-qemu`

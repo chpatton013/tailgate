@@ -50,13 +50,15 @@ Vagrant.configure("2") do |config|
     qe.cpu     = "host"
     qe.smp     = "2"
     qe.memory  = "1024"
-    # Replace vagrant-qemu's default user-mode NIC with a socket_vmnet-backed
-    # one so the guest gets a host-reachable 192.168.105.x address.
-    qe.net_device = nil
-    qe.qemu_bin   = [vmnet_client, vmnet_socket, qemu_bin]
+    # Two NICs:
+    #   net0 = vagrant-qemu's default user-mode NIC (hostfwd :50022 -> :22) — this
+    #          is how Vagrant SSHes in to manage the box. Leave it intact.
+    #   net1 = socket_vmnet NIC, giving the guest a host-reachable 192.168.105.x
+    #          address (fd 3 is the vmnet socket the wrapper hands to QEMU).
+    qe.qemu_bin = [vmnet_client, vmnet_socket, qemu_bin]
     qe.extra_qemu_args = %w[
-      -device virtio-net-pci,netdev=net0,mac=52:54:00:12:34:60
-      -netdev socket,id=net0,fd=3
+      -device virtio-net-pci,netdev=net1,mac=52:54:00:12:34:60
+      -netdev socket,id=net1,fd=3
     ]
   end
 

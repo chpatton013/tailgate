@@ -3,3 +3,6 @@
 
 # macOS
 .DS_Store
+
+# Vagrant VM state (large disk images, machine-local)
+.vagrant/

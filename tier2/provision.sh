@@ -29,7 +29,7 @@ fi
 
 curl -fsSL https://tailscale.com/install.sh | sh
 apt-get update -y
-apt-get install -y dnsmasq
+apt-get install -y dnsmasq dnsutils
 
 echo 'net.ipv4.ip_forward = 1' >/etc/sysctl.d/99-tailgate.conf
 sysctl -p /etc/sysctl.d/99-tailgate.conf
@@ -58,14 +58,18 @@ done
 ip -4 addr show "$VMNET_IF" | grep -q '192\.168\.105\.' \
   || { echo "ERROR: $VMNET_IF never got a 192.168.105.x address"; exit 1; }
 
-# --- join the tailnet (TUN, MagicDNS on) -------------------------------------
-# --accept-dns=true ensures tailscaled pulls the MagicDNS config and serves it
-# at 100.100.100.100. --reset clears prior state on re-provision.
+# --- join the tailnet (TUN) --------------------------------------------------
+# --accept-dns=FALSE on purpose: in TUN mode tailscaled serves MagicDNS at
+# 100.100.100.100 regardless of this flag (it only controls whether tailscale
+# rewrites the *guest's own* resolv.conf, which we don't need — dnsmasq queries
+# 100.100.100.100 directly). Setting it true makes tailscale reconfigure
+# systemd-resolved mid-provision, which can bounce networking and drop Vagrant's
+# management SSH. --reset clears prior state on re-provision.
 tailscale up \
   --login-server="${TS_LOGIN_SERVER}" \
   --authkey="${TS_AUTHKEY}" \
   --hostname="${HOSTNAME_TS}" \
-  --accept-dns=true \
+  --accept-dns=false \
   --reset
 
 # --- NAT host traffic onto the tailnet ---------------------------------------
@@ -92,14 +96,17 @@ EOF
 systemctl enable dnsmasq
 systemctl restart dnsmasq
 
-# --- report ------------------------------------------------------------------
-echo "=== gateway socket_vmnet interface: ${VMNET_IF} ==="
-ip -4 addr show "$VMNET_IF" | awk '/inet /{print "  host-reachable IP:", $2}'
+# --- report + self-test ------------------------------------------------------
+GW4="$(ip -4 addr show "$VMNET_IF" | awk '/inet /{print $2}' | cut -d/ -f1)"
+echo "=== gateway socket_vmnet interface: ${VMNET_IF} (host-reachable IP ${GW4}) ==="
 echo "=== gateway tailnet IP ==="
 tailscale ip -4 | sed 's/^/  /'
-echo "=== MagicDNS self-test (resolve ${HOSTNAME_TS}.${TS_MAGICDNS_DOMAIN} via dnsmasq) ==="
-getent hosts "${HOSTNAME_TS}.${TS_MAGICDNS_DOMAIN}" || \
-  dig +short "@127.0.0.1" "${HOSTNAME_TS}.${TS_MAGICDNS_DOMAIN}" || \
-  echo "  (could not resolve — check 'tailscale status' and dnsmasq)"
+# Confirm the full DNS path works with --accept-dns=false: MagicDNS answers at
+# 100.100.100.100, and dnsmasq (which the host's /etc/resolver points at) relays it.
+SELF="${HOSTNAME_TS}.${TS_MAGICDNS_DOMAIN}"
+echo "=== DNS self-test for ${SELF} ==="
+echo "  direct @100.100.100.100 : $(dig +short @100.100.100.100 "$SELF" 2>/dev/null | tr '\n' ' ')"
+echo "  via dnsmasq @${GW4}      : $(dig +short @"${GW4}" "$SELF" 2>/dev/null | tr '\n' ' ')"
+echo "  (both should show this node's 100.64.x.y; if blank, MagicDNS/dnsmasq need a look)"
 echo "=== tailnet peers ==="
 tailscale status || true

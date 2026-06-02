@@ -79,6 +79,11 @@ iptables -C FORWARD -i "$VMNET_IF" -o tailscale0 -j ACCEPT 2>/dev/null \
   || iptables -A FORWARD -i "$VMNET_IF" -o tailscale0 -j ACCEPT
 iptables -C FORWARD -i tailscale0 -o "$VMNET_IF" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null \
   || iptables -A FORWARD -i tailscale0 -o "$VMNET_IF" -m state --state RELATED,ESTABLISHED -j ACCEPT
+# Clamp TCP MSS to the path MTU. tailscale0's MTU is 1280; without this, a session
+# TCP-connects fine but larger packets (e.g. SSH key exchange) exceed the tunnel MTU
+# and silently blackhole, so the connection stalls and times out mid-handshake.
+iptables -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null \
+  || iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 
 # --- DNS forwarder ------------------------------------------------------------
 # Listen on the vmnet NIC and forward EVERYTHING to tailscaled's MagicDNS

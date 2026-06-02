@@ -113,11 +113,20 @@ reachability probe), `docs/` (design + usage).
 11. **Never commit `tier2/.vagrant/`** — it holds multi-hundred-MB VM disk images
     (gitignored). `git add -A` will try to and GitHub will reject the push.
 
-12. **The QEMU VM can wedge after host sleep.** Vagrant still reports it "running"
-    (the qemu process is alive) but the guest stops answering SSH, so anything using
-    `vagrant ssh` (incl. `tailgate-tier2 up`/`status`) fails. Recover with
-    `cd tier2 && vagrant destroy -f && vagrant up` (mint a fresh pre-auth key first if
-    the previous was single-use). Surviving sleep/reboot cleanly is a Tier 3 goal.
+12. **QEMU+HVF guest hard-halt (the freeze we hit repeatedly).** Symptom: the guest
+    silently stops executing — journald cuts off mid-line with no panic/OOM, the serial
+    console goes quiet, the VM is unreachable on *every* NIC, yet the qemu process is
+    still alive and Vagrant reports "running". So `vagrant ssh` (and thus
+    `tailgate-tier2 up`/`status`) hangs. **Root cause: `-cpu host` + `highmem=on` under
+    Apple HVF is unstable** (a known QEMU bug class). **Fix: use `cpu = "cortex-a72"` and
+    `machine = "virt,accel=hvf,highmem=off"`** (already set in `tier2/Vagrantfile`). It is
+    NOT host sleep (we wrongly assumed that at first; it reproduced with no sleep).
+    - **Recovering a hung guest:** `vagrant destroy` *hangs* on a halted guest (it waits
+      to shut it down gracefully). Force-kill first: `pkill -9 -f qemu-system-aarch64`
+      (or kill the specific PID), then `vagrant destroy -f` + `vagrant global-status
+      --prune`. Bound every `vagrant` call with `timeout` so a hang is visible, not silent.
+    - Make journald persistent in the guest (`/var/log/journal`) so a freeze's pre-death
+      logs survive the reboot — the default volatile journal loses them.
 
 ## Tier 2 wiring reminders
 

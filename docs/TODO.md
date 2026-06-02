@@ -66,9 +66,11 @@ each time and the host route/resolver target can drift across reboots.
 
 ## Tier 3 — polished, near-invisible
 
-- **Survive sleep/reboot.** The QEMU VM wedges across host sleep (see AGENTS.md #12).
-  Auto-recover: detect the wedge and `reload`/recreate; re-join the tailnet
-  automatically. This is the biggest robustness gap.
+- **VM stability + survive sleep/reboot.** The repeated guest freezes were a
+  QEMU+HVF `-cpu host`/`highmem=on` hard-halt, now mitigated with `cortex-a72` +
+  `highmem=off` (AGENTS.md #12) — needs a soak test to confirm it's actually fixed.
+  Separately, still validate behavior across a *real* host sleep and reboot, and add
+  auto-recovery (detect a hung guest, force-kill qemu, recreate, re-join) as a backstop.
 - **Persist host wiring.** A macOS **LaunchDaemon** that re-adds the
   `route 100.64.0.0/10 → VM` and ensures `/etc/resolver/<domain>` on boot, after
   wake-from-sleep, and on network change (macOS drops manual routes on these).

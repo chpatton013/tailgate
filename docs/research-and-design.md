@@ -12,10 +12,10 @@ Date: 2026-05-31
 > tiers are recorded here as history/design, not as a committed roadmap:
 > - *Tier 0* (operate from inside a TUN container) was a throwaway validation step and has
 >   been removed from the repo.
-> - *Tier 2* (transparent L3 routing + host-wide MagicDNS via a gateway VM, in `tier2/`) was
+> - *Tier 2* (transparent L3 routing + host-wide MagicDNS via a gateway VM) was
 >   **functionally validated** but its macOS substrate (QEMU+HVF) suffers an **unresolved
 >   guest hard-halt** (~15 min; the `cortex-a72`/`highmem=off` fix did *not* hold), and it is
->   inherently macOS-specific. It's kept as an **experimental, unsupported** prototype.
+>   inherently macOS-specific. The code was **removed**; §10 keeps the implementation notes.
 > - *Tier 3* (polish/automation) is aspirational and unbuilt.
 >
 > Net: the portable proxy is the deliverable; transparent routing would require a Mac-native
@@ -447,3 +447,41 @@ Two spikes were run on the actual managed laptop (Apple Silicon, macOS 26.x).
 - Internal: `headscale-infra` — `infra/stacks/headscale_stack.py`,
   `infra/models/headscale_config.py`, `config.toml`,
   `assets/lambda/headscale_exit_node_preauthkey`.
+
+---
+
+## 10. Tier 2 implementation notes (archived — code removed)
+
+A working Tier 2 gateway was built (`tier2/`: a Vagrant+QEMU+socket_vmnet Linux VM running
+tailscaled in TUN mode + NAT + dnsmasq, plus a `tailgate-tier2` CLI for the host route +
+`/etc/resolver`). Routing and host-wide MagicDNS were **validated end to end**. The code was
+then **removed** because the substrate isn't durable and is inherently macOS-specific (the
+portable userspace proxy is the product). These are the hard-won specifics, kept for anyone
+who revives the idea:
+
+- **⚠️ Unresolved blocker — QEMU+HVF guest hard-halt.** The guest silently stops executing
+  (~15 min in): journald cuts off mid-line, no panic/OOM, unreachable on every NIC, qemu
+  still alive, Vagrant says "running". Not host sleep (reproduced without it). The
+  documented-stable `cpu=cortex-a72` + `machine=virt,accel=hvf,highmem=off` did **NOT** fix
+  it. A durable transparent gateway on macOS realistically needs a **Mac-native VM** (Apple
+  Virtualization.framework via Lima/vfkit/Tart) — deliberately not adopted, to keep the
+  project portable. Transparent L3 + host split-DNS on macOS is intrinsically platform-
+  specific regardless (Apple `vmnet` + `/etc/resolver` + macOS `route`).
+- **Host-reachable guest IP** required `socket_vmnet` as a **second NIC**, keeping
+  vagrant-qemu's user-mode NIC as `net0` for Vagrant's SSH (`hostfwd :50022`); removing it
+  hangs `vagrant up`. DHCP'd the vmnet NIC and stripped its default route.
+- **MSS clamp is mandatory:** `iptables -t mangle -A FORWARD ... --clamp-mss-to-pmtu`.
+  tailscale0's MTU is 1280; without it a session TCP-connects but large packets (SSH key
+  exchange) blackhole and time out.
+- **DNS:** keep `--accept-dns=false` (MagicDNS at `100.100.100.100` answers regardless in TUN
+  mode; `--accept-dns=true` reconfigured systemd-resolved mid-provision and dropped Vagrant's
+  SSH). dnsmasq forwards everything to `100.100.100.100` and binds the vmnet NIC
+  (`bind-dynamic`); the host's `/etc/resolver/<domain>` scopes which queries reach it, so
+  `TS_MAGICDNS_DOMAIN` must exactly match the Headscale base domain. The apt install of
+  dnsmasq auto-starts it before the drop-in exists and logs a benign `:53` bind failure.
+- **Corporate SSL-decrypt:** generic HTTPS in the guest (install script, apt) needs the
+  corporate root CA trusted (`update-ca-certificates`); tailscale itself tolerates the MITM.
+- **Ops:** `vagrant plugin list` broke on a stale pin (`vagrant plugin expunge --force` then
+  reinstall). A hung guest makes `vagrant destroy` hang — `pkill -9 -f qemu-system-aarch64`
+  first. Each `destroy`+`up` re-registers a new Headscale node (use ephemeral keys to avoid
+  stale-node churn). IPv4-only (socket_vmnet shared networking is v4).

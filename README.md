@@ -50,7 +50,8 @@ docs/               usage guide, plus design notes & history
 ## Design notes & history
 
 [`docs/research-and-design.md`](docs/research-and-design.md) records the original research and
-a tiered exploration that went beyond this proxy — including an **experimental** transparent
-L3 routing + host-wide MagicDNS gateway VM (in [`tier2/`](tier2/)). That transparent approach
-was functionally validated but its macOS substrate (QEMU+HVF) proved unstable, and it is
-inherently platform-specific; the userspace proxy here is the portable, supported tool.
+a tiered exploration that went beyond this proxy — including a transparent L3 routing +
+host-wide MagicDNS gateway VM. That approach was functionally validated but its macOS
+substrate (QEMU+HVF) proved unstable and is inherently platform-specific, so its code was
+removed (§10 of that doc keeps the implementation notes). The userspace proxy here is the
+portable, supported tool.

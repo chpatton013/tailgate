@@ -4,14 +4,24 @@ Snapshot of what's left, roughly in priority order. See
 [`research-and-design.md`](research-and-design.md) for the tier design and
 [`../AGENTS.md`](../AGENTS.md) for the hard-won gotchas behind several of these.
 
-**Where things stand:** Tier 0/1 shipped and in use. Tier 2 (transparent gateway)
-is functionally validated — routing to `100.64.0.0/10` and host-wide MagicDNS via
-the gateway VM both work end to end. What remains for Tier 2 is *hardening* so it's
-not fragile; Tier 3 is the "near-invisible" polish.
+**Where things stand:** the **userspace proxy is the shipped product** (see the README and
+`docs/usage.md`) and needs nothing here. Everything below concerns the **experimental,
+shelved `tier2/` transparent gateway** — recorded for if it's ever revisited, not active work.
+
+## Blocker: the gateway isn't durable
+
+The `tier2/` gateway is functionally validated (routing to `100.64.0.0/10` and host-wide
+MagicDNS both work end to end), but the QEMU+HVF guest **hard-halts ~15 min in** (silent
+vCPU freeze — see AGENTS.md). The documented-stable `cpu=cortex-a72` + `highmem=off` change
+**did not fix it** — it froze again. A durable fix realistically needs a **Mac-native VM**
+(Apple Virtualization.framework via Lima/vfkit/Tart), which we deliberately did **not** adopt
+to keep the project portable. So transparent routing on this substrate is effectively a dead
+end; reviving it means re-platforming the VM (accepting macOS-specificity) or finding a
+genuinely portable host-routable-VM path. **Everything below is moot until this is resolved.**
 
 ---
 
-## Tier 2 hardening (make the working gateway robust)
+## If `tier2/` is revisited — hardening
 
 ### 1. Ephemeral pre-auth keys + stale-node cleanup  ⟵ requested
 Every `vm-destroy` + `vagrant up` is a brand-new guest (the disk is wiped), so it
@@ -66,11 +76,10 @@ each time and the host route/resolver target can drift across reboots.
 
 ## Tier 3 — polished, near-invisible
 
-- **VM stability + survive sleep/reboot.** The repeated guest freezes were a
-  QEMU+HVF `-cpu host`/`highmem=on` hard-halt, now mitigated with `cortex-a72` +
-  `highmem=off` (AGENTS.md #12) — needs a soak test to confirm it's actually fixed.
-  Separately, still validate behavior across a *real* host sleep and reboot, and add
-  auto-recovery (detect a hung guest, force-kill qemu, recreate, re-join) as a backstop.
+- **VM stability** — gated by the unresolved hard-halt in the Blocker above; nothing else
+  here matters until the VM survives more than ~15 min. Once it does, validate across a real
+  host sleep and reboot, and add auto-recovery (detect a hung guest, force-kill qemu,
+  recreate, re-join).
 - **Persist host wiring.** A macOS **LaunchDaemon** that re-adds the
   `route 100.64.0.0/10 → VM` and ensures `/etc/resolver/<domain>` on boot, after
   wake-from-sleep, and on network change (macOS drops manual routes on these).

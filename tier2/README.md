@@ -1,4 +1,10 @@
-# Tier 2 — transparent gateway
+# Tier 2 — transparent gateway (experimental, unsupported)
+
+> ⚠️ **This is a shelved prototype, not the product.** The supported tool is the userspace
+> proxy (repo README + `docs/usage.md`). This gateway was *functionally validated* (routing
+> + host-wide MagicDNS both work), but its QEMU+HVF guest suffers an **unresolved hard-halt**
+> (~15 min; the `cortex-a72`/`highmem=off` fix did not hold), and it's **macOS-specific by
+> nature** (Apple `vmnet` + `/etc/resolver`). Kept for reference. See `docs/TODO.md`.
 
 A small QEMU + socket_vmnet Linux VM joins the tailnet in TUN mode and acts as a
 **gateway**: the macOS host routes `100.64.0.0/10` to it and forwards the tailnet

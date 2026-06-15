@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# tailgate — drive the Tailscale-in-a-container PoC and reach the tailnet from the host.
+# tailgate — run the Tailscale client in a container and reach your tailnet from the host.
 #
-#   tailgate up [--tun]     start the client (default: Tier 1 userspace+proxy; --tun: Tier 0)
+#   tailgate up             start the client (userspace; SOCKS5 + HTTP proxy on loopback)
 #   tailgate down           stop and remove the container
 #   tailgate status         tailscale status (from inside the container)
 #   tailgate ip             this node's tailnet IP(s)
@@ -48,13 +48,8 @@ require_env() {
 
 cmd_up() {
   require_env
-  if [[ "${1:-}" == "--tun" ]]; then
-    info "Starting Tier 0 (TUN mode) — operate from inside: tailgate status / ssh / curl"
-    compose -f compose.yaml -f compose.tun.yaml up -d
-  else
-    info "Starting Tier 1 (userspace + SOCKS5 ${SOCKS5_ADDR})"
-    compose up -d
-  fi
+  info "Starting tailgate (userspace proxy — SOCKS5 ${SOCKS5_ADDR}, HTTP 127.0.0.1:${HTTP_PROXY_PORT})"
+  compose up -d
   info "Watch registration with:  tailgate logs    (Ctrl-C to stop watching)"
 }
 
@@ -144,11 +139,11 @@ cmd_doctor() {
     fi
   fi
 
-  # Proxy reachable from the host? (skip in TUN mode where it's not exposed)
+  # Proxy reachable from the host?
   if nc -z 127.0.0.1 "${SOCKS5_PORT}" 2>/dev/null; then
     ok "✓ SOCKS5 proxy reachable on ${SOCKS5_ADDR}"
   else
-    info "· SOCKS5 proxy not reachable on ${SOCKS5_ADDR} (expected in --tun mode)"
+    err "✗ SOCKS5 proxy not reachable on ${SOCKS5_ADDR}"; fail=1
   fi
 
   [[ $fail -eq 0 ]] && ok "doctor: all good" || { err "doctor: problems found"; return 1; }

@@ -1,13 +1,10 @@
-# Tailgate — Tier 1 (default): Tailscale client in userspace mode, exposing a
-# SOCKS5 + HTTP proxy to the host so host-side tools (ssh/curl/browser) can reach
-# the tailnet without a VPN client on the host.
+# Tailgate — the Tailscale client in a container, in userspace mode, exposing a
+# SOCKS5 + HTTP proxy to the host so host-side tools (ssh/curl/browser) reach the
+# tailnet without a VPN client installed on the host.
 #
-#   docker compose up -d           # start
+#   docker compose up -d           # start  (or: ./bin/tailgate up)
 #   docker compose logs -f         # watch registration
 #   docker compose exec tailscale tailscale status
-#
-# For Tier 0 (TUN mode, operate from inside the container) layer the override:
-#   docker compose -f compose.yaml -f compose.tun.yaml up -d
 #
 # Config comes from .env (copy .env.example -> .env first).
 
@@ -28,7 +25,7 @@ services:
       TS_HOSTNAME: "${TS_HOSTNAME:-tailgate-laptop}"
       TS_EXTRA_ARGS: "--login-server=${TS_LOGIN_SERVER:-https://headscale.example.com} ${TS_UP_EXTRA_ARGS:-}"
       TS_STATE_DIR: /var/lib/tailscale
-      # --- Tier 1: userspace + proxy ---
+      # --- userspace proxy ---
       # SOCKS5 (any TCP) and HTTP proxy. They CAN share one port, but we keep
       # them separate for predictability: 1055 = SOCKS5, 1056 = HTTP.
       TS_USERSPACE: "true"

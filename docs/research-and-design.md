@@ -7,6 +7,20 @@ Status: design / pre-implementation
 Author: Claude (research pass), for user
 Date: 2026-05-31
 
+> **Where this landed (read first).** The **shipped product is the userspace SOCKS5/HTTP
+> proxy** described below as "Tier 1" — see the repo README and `docs/usage.md`. The other
+> tiers are recorded here as history/design, not as a committed roadmap:
+> - *Tier 0* (operate from inside a TUN container) was a throwaway validation step and has
+>   been removed from the repo.
+> - *Tier 2* (transparent L3 routing + host-wide MagicDNS via a gateway VM, in `tier2/`) was
+>   **functionally validated** but its macOS substrate (QEMU+HVF) suffers an **unresolved
+>   guest hard-halt** (~15 min; the `cortex-a72`/`highmem=off` fix did *not* hold), and it is
+>   inherently macOS-specific. It's kept as an **experimental, unsupported** prototype.
+> - *Tier 3* (polish/automation) is aspirational and unbuilt.
+>
+> Net: the portable proxy is the deliverable; transparent routing would require a Mac-native
+> VM (Apple Virtualization.framework), deliberately not adopted to keep the project portable.
+
 ---
 
 ## 1. Problem statement

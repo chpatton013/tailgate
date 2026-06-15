@@ -68,9 +68,17 @@ re-platforming onto a Mac-native VM — a portability tradeoff that was delibera
    openssl s_client -connect <host>:443 -servername <host> </dev/null 2>/dev/null \
      | openssl x509 -noout -issuer        # a corporate issuer == interception
    ```
-   **Tailscale itself is unaffected** — its control plane is secured by the Noise protocol
-   (not web PKI) and the data plane is WireGuard end-to-end, so the tunnel works *and stays
-   confidential* even through the MITM. That's why the proxy works with a stock image.
-   (Generic HTTPS *inside a guest VM* — install scripts, `apt` — does fail and needs the
-   corporate root CA trusted; see the archived gateway notes in
-   `docs/research-and-design.md` §10.)
+   **Tailscale's *traffic* stays confidential** — control is Noise-secured and the data
+   plane is WireGuard end-to-end, so the MITM can't read or tamper with it. **But the client
+   still validates the TLS certificate** on its control + DERP HTTPS connections by default,
+   so an untrusted corporate CA breaks tailscale at the TLS layer:
+   `fetch control key: ... x509: certificate signed by unknown authority`. **Fix: trust the
+   corporate root CA in the container** — drop it into `./certs` (mounted at `/certs`, with
+   `SSL_CERT_DIR=/certs` in `compose.yaml`; Go adds it to the standard roots). Export it with
+   the `security find-certificate` command below. (Generic HTTPS in any guest — install
+   scripts, `apt` — needs the same CA trust.) *An earlier claim that a stock image "just
+   works" through the MITM was wrong — the CA must be trusted.*
+   ```sh
+   # Repeat -c for each corporate CA name (the decrypt proxy often uses a vendor sub-CA too):
+   security find-certificate -a -p -c "<Org>" /Library/Keychains/System.keychain > certs/corp-ca.pem
+   ```

@@ -3,3 +3,7 @@
 
 # macOS
 .DS_Store
+
+# Extra CA material is machine/tenant-specific; keep the dir, not the certs.
+certs/*.pem
+certs/*.crt

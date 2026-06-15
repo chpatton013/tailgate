@@ -32,9 +32,16 @@ services:
       TS_SOCKS5_SERVER: 0.0.0.0:1055
       TS_OUTBOUND_HTTP_PROXY_LISTEN: 0.0.0.0:1056
       TS_ENABLE_HEALTH_CHECK: "true"
+      # Trust extra root CAs (Go reads every cert in this dir *in addition to* the
+      # image's standard roots). Drop your corporate SSL-decrypt root CA into ./certs
+      # if your egress is TLS-intercepted, or tailscale's control connection fails with
+      # `x509: certificate signed by unknown authority`. Empty ./certs is harmless.
+      SSL_CERT_DIR: /certs
     volumes:
       # Persist node identity across rebuilds so Headplane doesn't churn.
       - tailscale-state:/var/lib/tailscale
+      # Extra trusted CAs (e.g. a corporate SSL-decrypt root). See SSL_CERT_DIR above.
+      - ./certs:/certs:ro
     ports:
       # Bound to loopback only — the proxy must never be reachable off-host.
       - "127.0.0.1:${TS_SOCKS5_PORT:-1055}:1055"

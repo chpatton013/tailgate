@@ -135,6 +135,15 @@ Then open a tailnet node's web UI, e.g. `http://myhost.ts.example.com:<port>`.
   `https://headscale.example.com` and that the key hasn't expired or been used up
   (single-use keys register one node; the state volume preserves identity across
   restarts, so you normally register only once).
+- **`x509: certificate signed by unknown authority`** (on `fetch control key`) — your
+  egress is behind a corporate SSL-decrypt proxy that re-signs HTTPS with a CA the
+  container doesn't trust. Export your corporate root CA into `certs/` and restart:
+  ```sh
+  security find-certificate -a -p -c "<Org>" /Library/Keychains/System.keychain > certs/corp-ca.pem
+  ./bin/tailgate down && ./bin/tailgate up
+  ```
+  The container mounts `certs/` at `/certs` (`SSL_CERT_DIR`) and trusts everything in it
+  alongside the standard roots.
 - **`AuthKey not found`** — the key's user was renamed/recreated server-side; mint a new
   key.
 - **Proxy not reachable** — confirm the container is up with `tailgate doctor`.

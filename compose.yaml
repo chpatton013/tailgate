@@ -46,6 +46,18 @@ services:
       # Bound to loopback only — the proxy must never be reachable off-host.
       - "127.0.0.1:${TS_SOCKS5_PORT:-1055}:1055"
       - "127.0.0.1:${TS_HTTP_PROXY_PORT:-1056}:1056"
+    # Resolver the container uses for its OWN name lookups -- notably
+    # resolving the control-plane host (TS_LOGIN_SERVER) at startup.
+    # MagicDNS for proxied traffic is unaffected: socks5h/HTTP-proxy
+    # clients resolve names *at the proxy* (tailscaled), not via this
+    # resolv.conf. Must NOT be 127.0.0.1: in a bridge-network container
+    # that's the container's own loopback, where tailscaled's resolver
+    # only listens once connected -- so on a cold start while logged
+    # out it can't resolve the control plane to log in (chicken-and-egg
+    # -> "no DNS fallback candidates remain").
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     restart: unless-stopped
 
 volumes:

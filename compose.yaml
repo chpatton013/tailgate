@@ -1,64 +1,96 @@
-# Tailgate — the Tailscale client in a container, in userspace mode, exposing a
-# SOCKS5 + HTTP proxy to the host so host-side tools (ssh/curl/browser) reach the
-# tailnet without a VPN client installed on the host.
+# Tailgate — the Tailscale client in a container, exposing a SOCKS5 + HTTP proxy to
+# the host so host-side tools (ssh/curl/browser) reach the tailnet without a VPN client
+# installed on the host.
 #
 #   docker compose up -d           # start  (or: ./bin/tailgate up)
 #   docker compose logs -f         # watch registration
 #   docker compose exec tailscale tailscale status
 #
 # Config comes from .env (copy .env.example -> .env first).
+#
+# Two mutually-exclusive modes, selected by TS_MODE in .env (default: userspace) and
+# activated by bin/tailgate via `COMPOSE_PROFILES`:
+#   - userspace (default): no TUN/NET_ADMIN. Exposes only a SOCKS5 + HTTP proxy on host
+#     loopback. Fully portable, works under locked-down Docker daemons. Cannot route
+#     subnet-router prefixes (e.g. 10.0.0.0/16) — only direct tailnet peers.
+#   - kernel: real `tailscale0` + NET_ADMIN + /dev/net/tun, so `--accept-routes`
+#     actually installs subnet routes. Docker Desktop runs containers inside its own
+#     Linux VM, so this cap grant happens inside that VM, not on the host — it does not
+#     create a host-level VPN interface/profile the way a native `tailscaled` would.
+#     EXPERIMENTAL: getting host processes to actually reach those routes still needs a
+#     host -> container route, which Docker Desktop for Mac's networking may not support
+#     the way a Linux host would. Proxy ports still work in this mode too.
+
+x-tailscale-common: &tailscale-common
+  image: tailscale/tailscale:${TS_IMAGE_TAG:-stable}
+  container_name: tailgate
+  hostname: ${TS_HOSTNAME:-tailgate-laptop}
+  # Join Docker's existing default bridge instead of creating a dedicated
+  # network. tailgate only needs outbound access + loopback-published ports,
+  # and this host's daemon scopes default-address-pools to a single /24 that
+  # the default bridge already consumes — so a per-project network can't be
+  # allocated ("address pools have been fully subnetted").
+  network_mode: bridge
+  volumes:
+    # Persist node identity across rebuilds so Headplane doesn't churn.
+    - tailscale-state:/var/lib/tailscale
+    # Extra trusted CAs (e.g. a corporate SSL-decrypt root). See SSL_CERT_DIR below.
+    - ./certs:/certs:ro
+  ports:
+    # Bound to loopback only — the proxy must never be reachable off-host.
+    - "127.0.0.1:${TS_SOCKS5_PORT:-1055}:1055"
+    - "127.0.0.1:${TS_HTTP_PROXY_PORT:-1056}:1056"
+  # Resolver the container uses for its OWN name lookups -- notably
+  # resolving the control-plane host (TS_LOGIN_SERVER) at startup.
+  # MagicDNS for proxied traffic is unaffected: socks5h/HTTP-proxy
+  # clients resolve names *at the proxy* (tailscaled), not via this
+  # resolv.conf. Must NOT be 127.0.0.1: in a bridge-network container
+  # that's the container's own loopback, where tailscaled's resolver
+  # only listens once connected -- so on a cold start while logged
+  # out it can't resolve the control plane to log in (chicken-and-egg
+  # -> "no DNS fallback candidates remain").
+  dns:
+    - 1.1.1.1
+    - 8.8.8.8
+  restart: unless-stopped
+
+x-tailscale-env: &tailscale-env
+  # --- identity / control plane ---
+  TS_AUTHKEY: "${TS_AUTHKEY:?set TS_AUTHKEY in .env — run bin/mint-authkey}"
+  TS_HOSTNAME: "${TS_HOSTNAME:-tailgate-laptop}"
+  TS_EXTRA_ARGS: "--login-server=${TS_LOGIN_SERVER:-https://headscale.example.com} ${TS_UP_EXTRA_ARGS:-}"
+  TS_STATE_DIR: /var/lib/tailscale
+  # SOCKS5 (any TCP) and HTTP proxy. They CAN share one port, but we keep them
+  # separate for predictability: 1055 = SOCKS5, 1056 = HTTP. containerboot starts
+  # these listeners regardless of TS_USERSPACE, so they work in kernel mode too.
+  TS_SOCKS5_SERVER: 0.0.0.0:1055
+  TS_OUTBOUND_HTTP_PROXY_LISTEN: 0.0.0.0:1056
+  TS_ENABLE_HEALTH_CHECK: "true"
+  # Trust extra root CAs (Go reads every cert in this dir *in addition to* the
+  # image's standard roots). Drop your corporate SSL-decrypt root CA into ./certs
+  # if your egress is TLS-intercepted, or tailscale's control connection fails with
+  # `x509: certificate signed by unknown authority`. Empty ./certs is harmless.
+  SSL_CERT_DIR: /certs
 
 services:
-  tailscale:
-    image: tailscale/tailscale:${TS_IMAGE_TAG:-stable}
-    container_name: tailgate
-    hostname: ${TS_HOSTNAME:-tailgate-laptop}
-    # Join Docker's existing default bridge instead of creating a dedicated
-    # network. tailgate only needs outbound access + loopback-published ports,
-    # and this host's daemon scopes default-address-pools to a single /24 that
-    # the default bridge already consumes — so a per-project network can't be
-    # allocated ("address pools have been fully subnetted").
-    network_mode: bridge
+  tailscale-userspace:
+    <<: *tailscale-common
+    profiles: ["userspace"]
     environment:
-      # --- identity / control plane ---
-      TS_AUTHKEY: "${TS_AUTHKEY:?set TS_AUTHKEY in .env — run bin/mint-authkey}"
-      TS_HOSTNAME: "${TS_HOSTNAME:-tailgate-laptop}"
-      TS_EXTRA_ARGS: "--login-server=${TS_LOGIN_SERVER:-https://headscale.example.com} ${TS_UP_EXTRA_ARGS:-}"
-      TS_STATE_DIR: /var/lib/tailscale
-      # --- userspace proxy ---
-      # SOCKS5 (any TCP) and HTTP proxy. They CAN share one port, but we keep
-      # them separate for predictability: 1055 = SOCKS5, 1056 = HTTP.
+      <<: *tailscale-env
       TS_USERSPACE: "true"
-      TS_SOCKS5_SERVER: 0.0.0.0:1055
-      TS_OUTBOUND_HTTP_PROXY_LISTEN: 0.0.0.0:1056
-      TS_ENABLE_HEALTH_CHECK: "true"
-      # Trust extra root CAs (Go reads every cert in this dir *in addition to* the
-      # image's standard roots). Drop your corporate SSL-decrypt root CA into ./certs
-      # if your egress is TLS-intercepted, or tailscale's control connection fails with
-      # `x509: certificate signed by unknown authority`. Empty ./certs is harmless.
-      SSL_CERT_DIR: /certs
-    volumes:
-      # Persist node identity across rebuilds so Headplane doesn't churn.
-      - tailscale-state:/var/lib/tailscale
-      # Extra trusted CAs (e.g. a corporate SSL-decrypt root). See SSL_CERT_DIR above.
-      - ./certs:/certs:ro
-    ports:
-      # Bound to loopback only — the proxy must never be reachable off-host.
-      - "127.0.0.1:${TS_SOCKS5_PORT:-1055}:1055"
-      - "127.0.0.1:${TS_HTTP_PROXY_PORT:-1056}:1056"
-    # Resolver the container uses for its OWN name lookups -- notably
-    # resolving the control-plane host (TS_LOGIN_SERVER) at startup.
-    # MagicDNS for proxied traffic is unaffected: socks5h/HTTP-proxy
-    # clients resolve names *at the proxy* (tailscaled), not via this
-    # resolv.conf. Must NOT be 127.0.0.1: in a bridge-network container
-    # that's the container's own loopback, where tailscaled's resolver
-    # only listens once connected -- so on a cold start while logged
-    # out it can't resolve the control plane to log in (chicken-and-egg
-    # -> "no DNS fallback candidates remain").
-    dns:
-      - 1.1.1.1
-      - 8.8.8.8
-    restart: unless-stopped
+
+  tailscale-kernel:
+    <<: *tailscale-common
+    profiles: ["kernel"]
+    # Real tailscale0 interface — see the note at the top of this file.
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      <<: *tailscale-env
+      TS_USERSPACE: "false"
 
 volumes:
   tailscale-state:

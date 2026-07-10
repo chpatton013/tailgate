@@ -115,6 +115,49 @@ Host *.ts.example.com 100.64.*
 
 Then open a tailnet node's web UI, e.g. `http://myhost.ts.example.com:<port>`.
 
+## Reaching subnet-routed hosts (kernel mode)
+
+By default tailgate runs `tailscaled` in **userspace mode**: no TUN device, so it can
+dial direct tailnet peers (`100.64.0.0/10`) but not hosts reachable only *through* a
+subnet router (e.g. a peer behind an exit node advertising `10.0.0.0/16`).
+
+Set `TS_MODE=kernel` in `.env` and add `--accept-routes` to `TS_UP_EXTRA_ARGS` to get a
+real `tailscale0` interface with `NET_ADMIN` + `/dev/net/tun`:
+
+```sh
+# .env
+TS_MODE=kernel
+TS_UP_EXTRA_ARGS=--accept-routes
+```
+
+```sh
+./bin/tailgate down     # remove the userspace container first — same container name
+./bin/tailgate up       # starts the kernel-mode profile instead
+```
+
+This is **container-scoped**, not host-scoped: your machine never gets a route to
+`10.0.0.0/16`, and doesn't need one. `tailscaled`'s own SOCKS5/HTTP proxy (still
+published to host loopback exactly as in userspace mode) now dials through
+`tailscaled`'s route table directly, so `tailgate curl`/`tailgate ssh`/`tailgate
+forward` and any `socks5h://` client on the host reach subnet-routed hosts with zero
+other host-side changes:
+
+```sh
+./bin/tailgate curl http://10.0.0.10:<port>
+```
+
+Docker Desktop grants `NET_ADMIN`/`/dev/net/tun` inside its own Linux VM, so this
+doesn't create a host-level VPN interface or profile the way a native `tailscaled`
+would — but it's a newer, less-exercised path than userspace mode. If it misbehaves,
+switch back with `TS_MODE=userspace` (or delete the line — that's the default).
+
+Verify it actually took effect (`doctor` alone won't tell you — it passes in both modes):
+
+```sh
+docker exec tailgate ip link show tailscale0        # real interface, not "does not exist"
+docker exec tailgate ip route get 10.0.0.10          # "dev tailscale0", not "unreachable"
+```
+
 ## Common operations
 
 | Command | Does |

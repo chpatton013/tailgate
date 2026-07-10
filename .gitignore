@@ -1,5 +1,7 @@
-# Secrets — never commit the populated env file.
+# Secrets — never commit the populated env file (or stray backups of it).
 .env
+.env.*
+!.env.example
 
 # macOS
 .DS_Store

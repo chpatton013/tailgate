@@ -26,6 +26,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -133,24 +134,33 @@ def create_preauthkey(
 
 
 def write_env(authkey: str) -> None:
-    """Set TS_AUTHKEY=<authkey> in ./.env, creating it from .env.example if needed."""
-    if not ENV_FILE.exists():
+    """Set the auth key in ./.env with owner-only permissions."""
+    authkey_assignment = "TS_AUTHKEY" + "="
+    if ENV_FILE.exists():
+        lines = ENV_FILE.read_text().splitlines()
+    else:
         example = REPO_ROOT / ".env.example"
-        if example.exists():
-            ENV_FILE.write_text(example.read_text())
-        else:
-            ENV_FILE.write_text("TS_AUTHKEY=\n")
-    lines = ENV_FILE.read_text().splitlines()
+        lines = example.read_text().splitlines() if example.exists() else []
+
     out, replaced = [], False
     for line in lines:
-        if line.strip().startswith("TS_AUTHKEY="):
-            out.append(f"TS_AUTHKEY={authkey}")
+        if line.strip().startswith(authkey_assignment):
+            out.append(authkey_assignment + authkey)
             replaced = True
         else:
             out.append(line)
     if not replaced:
-        out.append(f"TS_AUTHKEY={authkey}")
-    ENV_FILE.write_text("\n".join(out) + "\n")
+        out.append(authkey_assignment + authkey)
+
+    fd, temporary_name = tempfile.mkstemp(prefix=f".{ENV_FILE.name}.", dir=ENV_FILE.parent)
+    try:
+        with os.fdopen(fd, "w") as temporary:
+            temporary.write("\n".join(out) + "\n")
+        os.chmod(temporary_name, 0o600)
+        os.replace(temporary_name, ENV_FILE)
+        os.chmod(ENV_FILE, 0o600)
+    finally:
+        Path(temporary_name).unlink(missing_ok=True)
     print(f"Wrote TS_AUTHKEY to {ENV_FILE}", file=sys.stderr)
 
 

@@ -16,22 +16,58 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-# Load .env (for proxy ports / login server) without clobbering the real env.
-SOCKS5_PORT=1055
-HTTP_PROXY_PORT=1056
-LOGIN_SERVER="https://headscale.example.com"
-TS_MODE="userspace"
-if [[ -f .env ]]; then
-  # shellcheck disable=SC1091
-  set -a; source ./.env; set +a
-  SOCKS5_PORT="${TS_SOCKS5_PORT:-$SOCKS5_PORT}"
-  HTTP_PROXY_PORT="${TS_HTTP_PROXY_PORT:-$HTTP_PROXY_PORT}"
-  LOGIN_SERVER="${TS_LOGIN_SERVER:-$LOGIN_SERVER}"
-  TS_MODE="${TS_MODE:-userspace}"
+# Docker Compose parses .env without executing it. Tests and automation can
+# point at another file without reading or evaluating the local secret.
+ENV_FILE="${TAILGATE_ENV_FILE:-.env}"
+COMPOSE_ARGS=(compose)
+if [[ -n "${TAILGATE_ENV_FILE+x}" || -f "$ENV_FILE" ]]; then
+  COMPOSE_ARGS+=(--env-file "$ENV_FILE")
 fi
+
+compose() { docker "${COMPOSE_ARGS[@]}" "$@"; }
+
+COMPOSE_ENV=""
+if command -v docker >/dev/null 2>&1; then
+  COMPOSE_ENV="$(compose config --environment 2>/dev/null || true)"
+fi
+
+config_value() {
+  local key="$1" line
+  while IFS= read -r line; do
+    if [[ "$line" == "$key="* ]]; then
+      printf '%s' "${line#*=}"
+      return 0
+    fi
+  done <<<"$COMPOSE_ENV"
+  return 1
+}
+
+resolved_config() {
+  local key="$1" inherited="$2" fallback="$3" value
+  if value="$(config_value "$key")" && [[ -n "$value" ]]; then
+    printf '%s' "$value"
+  elif [[ -n "$inherited" ]]; then
+    printf '%s' "$inherited"
+  else
+    printf '%s' "$fallback"
+  fi
+}
+
+SOCKS5_PORT="$(resolved_config TS_SOCKS5_PORT "${TS_SOCKS5_PORT-}" 1055)"
+HTTP_PROXY_PORT="$(resolved_config TS_HTTP_PROXY_PORT "${TS_HTTP_PROXY_PORT-}" 1056)"
+LOGIN_SERVER="$(resolved_config TS_LOGIN_SERVER "${TS_LOGIN_SERVER-}" https://headscale.example.com)"
+TS_MODE="$(resolved_config TS_MODE "${TS_MODE-}" userspace)"
+TAILNET_SUFFIX="$(resolved_config TAILGATE_TAILNET_SUFFIX "${TAILGATE_TAILNET_SUFFIX-}" ts.example.com)"
+DNS_TEST_NAME="$(resolved_config TAILGATE_DNS_TEST_NAME "${TAILGATE_DNS_TEST_NAME-}" '')"
+FORCE_DERP="$(resolved_config TS_DEBUG_ALWAYS_USE_DERP "${TS_DEBUG_ALWAYS_USE_DERP-}" false)"
+AUTHKEY="$(resolved_config TS_AUTHKEY "${TS_AUTHKEY-}" '')"
 case "$TS_MODE" in
   userspace|kernel) ;;
-  *) echo "invalid TS_MODE '$TS_MODE' in .env (must be 'userspace' or 'kernel')" >&2; exit 1;;
+  *) echo "invalid TS_MODE '$TS_MODE' (must be 'userspace' or 'kernel')" >&2; exit 1;;
+esac
+case "$FORCE_DERP" in
+  true|false) ;;
+  *) echo "invalid TS_DEBUG_ALWAYS_USE_DERP '$FORCE_DERP' (must be 'true' or 'false')" >&2; exit 1;;
 esac
 SOCKS5_ADDR="127.0.0.1:${SOCKS5_PORT}"
 # Selects which compose service (and thus which profile) runs — the two modes
@@ -43,15 +79,13 @@ err()  { printf '\033[31m%s\033[0m\n' "$*" >&2; }
 ok()   { printf '\033[32m%s\033[0m\n' "$*"; }
 info() { printf '%s\n' "$*"; }
 
-compose() { docker compose "$@"; }
-
 require_env() {
-  if [[ ! -f .env ]]; then
-    err "No .env found. Run:  cp .env.example .env  &&  ./bin/mint-authkey --write-env"
+  if [[ ! -f "$ENV_FILE" ]]; then
+    err "No configuration found. Run:  cp .env.example .env  &&  ./bin/mint-authkey --write-env"
     exit 1
   fi
-  if ! grep -qE '^TS_AUTHKEY=.+' .env; then
-    err "TS_AUTHKEY is empty in .env. Run:  ./bin/mint-authkey --write-env"
+  if [[ -z "$AUTHKEY" ]]; then
+    err "TS_AUTHKEY is empty. Run:  ./bin/mint-authkey --write-env"
     exit 1
   fi
 }
@@ -115,47 +149,75 @@ cmd_proxy() {
   cat <<EOF
 SOCKS5 proxy : socks5h://${SOCKS5_ADDR}
 HTTP proxy   : http://127.0.0.1:${HTTP_PROXY_PORT}
+               (tailscaled backend; Headscale extra records require SOCKS5)
 
 Shell (curl, git, etc. — remote DNS via SOCKS):
+  unset HTTPS_PROXY https_proxy
   export ALL_PROXY=socks5h://${SOCKS5_ADDR}
-  export HTTPS_PROXY=http://127.0.0.1:${HTTP_PROXY_PORT}
 
 Browser (Firefox profile): SOCKS5 host 127.0.0.1 port ${SOCKS5_PORT},
   and enable "Proxy DNS when using SOCKS v5".
 
 SSH (~/.ssh/config):
-  Host *.ts.example.com 100.64.*
+  Host *.${TAILNET_SUFFIX} 100.64.*
     ProxyCommand nc -X 5 -x ${SOCKS5_ADDR} %h %p
 EOF
 }
 
 cmd_doctor() {
-  local fail=0
+  local fail=0 container_running=false
   command -v docker >/dev/null && ok "✓ docker present" || { err "✗ docker not found"; fail=1; }
-  if [[ -f .env ]] && grep -qE '^TS_AUTHKEY=.+' .env; then ok "✓ .env has TS_AUTHKEY"
-  else err "✗ .env missing or TS_AUTHKEY empty"; fail=1; fi
+  if [[ -f "$ENV_FILE" ]] && [[ -n "$AUTHKEY" ]]; then ok "✓ configuration has TS_AUTHKEY"
+  else err "✗ configuration missing or TS_AUTHKEY empty"; fail=1; fi
 
   info "mode: ${TS_MODE}"
+  if [[ "$FORCE_DERP" == "true" ]]; then
+    info "forced DERP enabled (debug setting; relay latency applies)"
+  fi
+
   if docker ps --format '{{.Names}}' | grep -qx tailgate; then
+    container_running=true
     ok "✓ container 'tailgate' running"
   else
     err "✗ container not running (try: tailgate up)"; fail=1
   fi
 
-  if docker ps --format '{{.Names}}' | grep -qx tailgate; then
-    if compose exec -T "$SERVICE" tailscale status >/dev/null 2>&1; then
+  if [[ "$container_running" == "true" ]]; then
+    if compose exec -T "$SERVICE" sh -c 'pidof tailgate-socks >/dev/null && pidof tailscaled >/dev/null'; then
+      ok "✓ tailgate processes running"
+    else
+      err "✗ tailgate processes are not healthy (check: tailgate logs)"; fail=1
+    fi
+
+    if compose exec -T "$SERVICE" tailscale status --json 2>/dev/null \
+      | grep -Eq '"BackendState"[[:space:]]*:[[:space:]]*"Running"'; then
       ok "✓ node registered to ${LOGIN_SERVER}"
       compose exec -T "$SERVICE" tailscale ip 2>/dev/null | sed 's/^/    ip: /' || true
     else
       err "✗ tailscale not registered yet (check: tailgate logs)"; fail=1
     fi
+
+    if compose exec -T "$SERVICE" nc -z 127.0.0.1 1057 >/dev/null 2>&1; then
+      ok "✓ tailscaled SOCKS backend reachable on 127.0.0.1:1057"
+    else
+      err "✗ tailscaled SOCKS backend not reachable on 127.0.0.1:1057"; fail=1
+    fi
+
+    if [[ -n "$DNS_TEST_NAME" ]]; then
+      if compose exec -T "$SERVICE" tailgate-socks --resolve "$DNS_TEST_NAME" >/dev/null 2>&1; then
+        ok "✓ internal alias resolves: ${DNS_TEST_NAME}"
+      else
+        err "✗ internal alias does not resolve: ${DNS_TEST_NAME}"; fail=1
+      fi
+    else
+      info "internal alias check skipped (set TAILGATE_DNS_TEST_NAME to enable)"
+    fi
   fi
 
-  # Proxy reachable from the host?
   if nc -z 127.0.0.1 "${SOCKS5_PORT}" 2>/dev/null; then
-    ok "✓ SOCKS5 proxy reachable on ${SOCKS5_ADDR}"
+    ok "✓ DNS-aware SOCKS shim reachable on ${SOCKS5_ADDR}"
   else
-    err "✗ SOCKS5 proxy not reachable on ${SOCKS5_ADDR}"; fail=1
+    err "✗ DNS-aware SOCKS shim not reachable on ${SOCKS5_ADDR}"; fail=1
   fi
 
   [[ $fail -eq 0 ]] && ok "doctor: all good" || { err "doctor: problems found"; return 1; }

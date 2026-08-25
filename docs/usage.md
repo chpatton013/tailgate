@@ -21,27 +21,41 @@ Get a pre-auth key, either:
 ```
 
 or mint one in the [Headplane UI](https://headplane.example.com) and paste it into
-`.env` as `TS_AUTHKEY=...`. Defaults in `.env` point at `https://headscale.example.com`,
-hostname `tailgate-laptop`.
+`.env`:
+
+```sh
+TS_AUTHKEY=...
+```
+
+Set `TAILGATE_TAILNET_SUFFIX` to the Headscale MagicDNS suffix. Defaults use
+`https://headscale.example.com`, `ts.example.com`, and hostname `tailgate-laptop`.
+
+To make `doctor` verify a Headscale extra-record alias, set an existing name:
+
+```sh
+TAILGATE_DNS_TEST_NAME=service.ts.example.com
+```
 
 ## 2. Start
 
 ```sh
 ./bin/tailgate up              # userspace mode; SOCKS5 on 127.0.0.1:1055, HTTP on :1056
 ./bin/tailgate logs            # watch it register; Ctrl-C when it's up
-./bin/tailgate doctor          # checks container, registration, and proxy reachability
+./bin/tailgate doctor          # checks processes, registration, both SOCKS layers, and optional DNS
 ```
 
-The node appears in Headplane. Only your registered nodes have MagicDNS names (e.g.
-`myhost`, `exit-node`); names resolve as `<node>.ts.example.com`.
+The node appears in Headplane. Registered nodes resolve as `<node>.ts.example.com`.
+Headscale `dns.extra_records` aliases under the configured suffix also work through the
+SOCKS endpoint: the front shim resolves them with Tailscale's internal DNS and delegates
+the resulting Tailnet IP to tailscaled's loopback-only SOCKS server.
 
 ## 3. Reach the tailnet
 
 ### Terminal
 
 ```sh
-# curl through the proxy — socks5h resolves names at the proxy, so MagicDNS works:
-./bin/tailgate curl -sS -o /dev/null -w '%{http_code}\n' http://myhost.ts.example.com:<port>
+# curl through the DNS-aware SOCKS shim; registered nodes and extra records work:
+./bin/tailgate curl -sS -o /dev/null -w '%{http_code}\n' http://service.ts.example.com:<port>
 
 # ssh through the proxy (pass any ssh flags straight through, e.g. -i for a key):
 ./bin/tailgate ssh -i ~/.ssh/id_ed25519 user@myhost.ts.example.com
@@ -77,8 +91,12 @@ service from the node with `tailscale serve`, or rebind it to the node's tailnet
 `./bin/tailgate proxy` prints ready-to-paste config. The essentials:
 
 ```sh
+unset HTTPS_PROXY https_proxy                  # these override ALL_PROXY for HTTPS
 export ALL_PROXY=socks5h://127.0.0.1:1055      # curl, git, many CLIs
 ```
+
+Port `1055` is the DNS-aware SOCKS shim. Port `1056` remains tailscaled's built-in HTTP
+proxy and does **not** gain Headscale extra-record resolution; use SOCKS5 for those aliases.
 
 The `tailgate ssh`/`forward` wrappers inject the `ProxyCommand` themselves, so they need
 no SSH config. A `Host` alias is optional convenience — it lets you shorten
@@ -114,6 +132,22 @@ Host *.ts.example.com 100.64.*
   --user-data-dir=/tmp/tailgate-chrome --proxy-server=socks5://127.0.0.1:1055`.
 
 Then open a tailnet node's web UI, e.g. `http://myhost.ts.example.com:<port>`.
+
+## DERP-only operation
+
+Tailscale normally tries direct WireGuard first and falls back to DERP. Some symmetric NAT
+or managed-network policies leave the peer visible but make the proxy dial time out. If
+`tailscale ping` reports a DERP path and SOCKS logs end with `context deadline exceeded`,
+try:
+
+```sh
+# .env
+TS_DEBUG_ALWAYS_USE_DERP=true
+```
+
+Restart with `./bin/tailgate down && ./bin/tailgate up`. This is a Tailscale **debug**
+setting, not the normal operating mode. It relays all peer traffic, adds latency, and may
+be affected by upstream changes. Leave it `false` when direct connections work.
 
 ## Reaching subnet-routed hosts (kernel mode)
 
@@ -181,14 +215,24 @@ docker exec tailgate ip route get 10.0.0.10          # "dev tailscale0", not "un
 - **`x509: certificate signed by unknown authority`** (on `fetch control key`) — your
   egress is behind a corporate SSL-decrypt proxy that re-signs HTTPS with a CA the
   container doesn't trust. Export your corporate root CA into `certs/` and restart:
+
   ```sh
   security find-certificate -a -p -c "<Org>" /Library/Keychains/System.keychain > certs/corp-ca.pem
   ./bin/tailgate down && ./bin/tailgate up
   ```
+
   The container mounts `certs/` at `/certs` (`SSL_CERT_DIR`) and trusts everything in it
   alongside the standard roots.
 - **`AuthKey not found`** — the key's user was renamed/recreated server-side; mint a new
   key.
-- **Proxy not reachable** — confirm the container is up with `tailgate doctor`.
-- **MagicDNS name won't resolve** — the tool is resolving locally; use the `100.x` IP, or
-  use `tailgate curl` / the `nc` ProxyCommand, which defer DNS to the proxy.
+- **Proxy not reachable** — run `tailgate doctor`. It reports the container processes,
+  registration, front DNS-aware shim, loopback tailscaled backend, and optional internal
+  alias check separately.
+- **Extra-record alias fails but a node name works** — verify `TAILGATE_TAILNET_SUFFIX`
+  matches Headscale's MagicDNS suffix. Set `TAILGATE_DNS_TEST_NAME` to the alias and rerun
+  `tailgate doctor`; the shim fails closed rather than leaking Tailnet names to public DNS.
+- **`context deadline exceeded` while the peer is visible** — the direct path may be
+  blocked by symmetric NAT or network policy. See [DERP-only operation](#derp-only-operation).
+- **MagicDNS name won't resolve** — the tool is resolving locally; use `tailgate curl` or
+  the `nc` ProxyCommand so the hostname reaches the SOCKS shim. The HTTP proxy on `1056`
+  does not resolve Headscale extra records.

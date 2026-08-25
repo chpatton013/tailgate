@@ -1,0 +1,20 @@
+{
+  "Name": "mail.ts.example.com",
+  "QueryType": "A",
+  "Resolvers": [
+    {"Addr": "https://cloudflare-dns.com/dns-query"},
+    {"Addr": "https://dns.google/dns-query"},
+    {"Addr": "1.1.1.1"},
+    {"Addr": "8.8.8.8"}
+  ],
+  "ResponseCode": "RCodeSuccess",
+  "Answers": [
+    {
+      "Name": "mail.ts.example.com.",
+      "TTL": 600,
+      "Class": "ClassINET",
+      "Type": "TypeA",
+      "Body": "100.100.50.25"
+    }
+  ]
+}

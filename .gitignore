@@ -9,3 +9,6 @@
 # Extra CA material is machine/tenant-specific; keep the dir, not the certs.
 certs/*.pem
 certs/*.crt
+
+# Local bootstrap exports can contain credentials and machine-specific values.
+/autoinstall-user-data*

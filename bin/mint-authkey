@@ -9,9 +9,11 @@ Usage:
     bin/mint-authkey                 # print a fresh key
     bin/mint-authkey --write-env     # also write it into ./.env as TS_AUTHKEY
     bin/mint-authkey --reusable --ephemeral --expiry-days 30
+    bin/mint-authkey --email alice@example.com  # OIDC user lookup by email
 
 Config is read from .env (or the environment):
     HEADSCALE_USER              (default: user)
+    HEADSCALE_USER_EMAIL        (optional — disambiguates OIDC users)
     TS_LOGIN_SERVER             (default: https://headscale.example.com)
     HEADSCALE_ADMIN_KEY_SECRET  (default: headscale/admin-api-key)
     AWS_PROFILE / AWS_REGION    (optional; passed through to the aws CLI)
@@ -103,17 +105,62 @@ def api(base_url: str, method: str, path: str, key: str, body=None):
         die(f"cannot reach {url}: {e.reason}")
 
 
-def ensure_user(base_url: str, key: str, name: str) -> str:
-    """Create the user if absent; return its numeric id."""
+def ensure_user(base_url: str, key: str, name: str, email: str | None = None) -> tuple[str, dict[str, str]]:
+    """Resolve or create the user; return (user_id, identity_info).
+
+    Identity info has keys: name, displayName, email, provider.
+    Uses multi-strategy lookup for OIDC-aware disambiguation.
+    """
     result = api(base_url, "POST", "user", key, {"name": name})
     if "user" in result:
-        return result["user"]["id"]
-    users = api(base_url, "GET", "user", key)
-    for u in users.get("users", []):
-        if u["name"] == name:
-            return u["id"]
-    die(f"could not find or create user '{name}': {result}")
-    return ""  # unreachable
+        user = result["user"]
+        return user["id"], _summary(user)
+
+    # 409 → name already exists; list to find it.
+    users = api(base_url, "GET", "user?name=" + urllib.parse.quote(name), key)["users"]
+    matches = [u for u in users if u.get("name") == name]
+
+    if len(matches) == 1:
+        return matches[0]["id"], _summary(matches[0])
+
+    if not email:
+        die(f"user '{name}' found {len(matches)} times; specify --email to disambiguate")
+
+    # Email fallback: look up by email, filter to OIDC users.
+    by_email_users = api(base_url, "GET", "user?email=" + urllib.parse.quote(email), key)["users"]
+    oidc_matches = [u for u in by_email_users if u.get("provider") == "oidc"]
+
+    if len(oidc_matches) != 1:
+        msg = f"email '{email}' matched {len(oidc_matches)} OIDC users"
+        if len(matches) > 1:
+            msg += f"; name '{name}' also matched {len(matches)} local/OIDC users"
+        die(msg)
+
+    return oidc_matches[0]["id"], _summary(oidc_matches[0])
+
+
+def _summary(user: dict[str, str]) -> dict[str, str]:
+    """Return a flat identity summary dict from a v1 User response."""
+    return {
+        "name": user.get("name", ""),
+        "displayName": user.get("displayName", ""),
+        "email": user.get("email", ""),
+        "providerId": user.get("providerId", ""),
+        "provider": user.get("provider", ""),
+    }
+
+
+def _fmt_identity(info: dict[str, str]) -> str:
+    """Format resolved identity for stderr output."""
+    display = info["displayName"] or info["name"]
+    email = info["email"]
+    parts = [f'\"{display}\"']
+    if email:
+        parts.append(f"<{email}>")
+    parts.append(f"id={info.get('providerId', '?')}")
+    if info["provider"]:
+        parts.append(f"provider={info['provider']}")
+    return " ".join(parts)
 
 
 def create_preauthkey(
@@ -170,10 +217,13 @@ def main() -> None:
     p.add_argument("--ephemeral", action="store_true", help="nodes auto-remove when offline")
     p.add_argument("--expiry-days", type=int, default=90, help="key validity (default 90)")
     p.add_argument("--write-env", action="store_true", help="write TS_AUTHKEY into ./.env")
+    p.add_argument("--email", default=None, help="email of OIDC user for disambiguation")
     args = p.parse_args()
 
     dotenv = load_dotenv(ENV_FILE)
     user = cfg(dotenv, "HEADSCALE_USER", "user")
+    # HEADSCALE_USER_EMAIL from env overrides CLI --email if both present.
+    email = os.environ.get("HEADSCALE_USER_EMAIL") or dotenv.get("HEADSCALE_USER_EMAIL") or args.email
     base_url = cfg(dotenv, "TS_LOGIN_SERVER", "https://headscale.example.com").rstrip("/")
     secret_id = cfg(dotenv, "HEADSCALE_ADMIN_KEY_SECRET", "headscale/admin-api-key")
     # Surface AWS_PROFILE/REGION from .env into the env the aws CLI sees.
@@ -182,7 +232,9 @@ def main() -> None:
             os.environ[k] = dotenv[k]
 
     admin_key = get_admin_key(secret_id)
-    user_id = ensure_user(base_url, admin_key, user)
+    user_id, identity = ensure_user(base_url, admin_key, user, email)
+    print(f"Resolved {_fmt_identity(identity)}",
+        file=sys.stderr)
     authkey = create_preauthkey(
         base_url, admin_key, user_id, args.reusable, args.ephemeral, args.expiry_days
     )

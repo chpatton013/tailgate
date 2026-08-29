@@ -30,6 +30,36 @@ TS_AUTHKEY=...
 Set `TAILGATE_TAILNET_SUFFIX` to the Headscale MagicDNS suffix. Defaults use
 `https://headscale.example.com`, `ts.example.com`, and hostname `tailgate-laptop`.
 
+### 1b. OIDC users
+
+If your Headscale instance uses **OIDC login** (as opposed to local/password auth),
+names on the tailnet come from the IdP — typically an email address or
+`preferred_username`. The `mint-authkey` tool resolves users by **name first**; with
+OIDC that can accidentally create a *new* local user when the display name differs
+from what you expect. Always pass `--email` (or set `HEADSCALE_USER_EMAIL` in `.env`)
+so the tool resolves the correct user by IdP principal:
+
+```sh
+./bin/mint-authkey --email alice@example.com  # find Alice via her IdP email
+```
+
+Or set it permanently in .env:
+
+```sh
+# .env
+HEADSCALE_USER=user
+HEADSCALE_USER_EMAIL=alice@example.com   # disambiguates by IdP email
+```
+
+The tool prints which user it resolves (see stderr) before it mints the key — confirm the
+printed `provider=oidc` line matches the expected identity.
+
+For all options:
+
+```sh
+./bin/mint-authkey --help
+```
+
 To make `doctor` verify a Headscale extra-record alias, set an existing name:
 
 ```sh

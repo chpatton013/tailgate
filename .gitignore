@@ -12,3 +12,48 @@ certs/*.crt
 
 # Local bootstrap exports can contain credentials and machine-specific values.
 /autoinstall-user-data*
+
+# Editor state
+*.sw[a-p]
+.*.un~
+.netrwhist
+Session.vim
+Sessionx.vim
+tags
+!tags/
+*~
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+!.vscode/*.code-snippets
+.history/
+
+# OS file explorer leftovers
+.AppleDouble
+.LSOverride
+._*
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+[Dd]esktop.ini
+
+# Python
+*.py[cod]
+*.egg-info/
+*$py.class
+__pycache__/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+build/
+dist/
+
+# C / C++
+cmake-build-*/
+*.o
+*.so

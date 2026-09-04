@@ -23,6 +23,13 @@ re-platforming onto a Mac-native VM — a portability tradeoff that was delibera
 
 ## Conventions (read before editing)
 
+- Shared agent context (instructions, house rules, prompts, skills) lives in
+  `AGENTS.md` and `.agents/skills/`, never duplicated into a harness-specific
+  directory (`.claude/`, `.cursor/`, `.opencode/`, `.pi/`, `.github/`, etc.) — those hold
+  only symlinks back into `.agents/` or minimal import shims. Load the `agent-context` skill
+  before creating, editing, or relocating any agent-facing instruction, rule, prompt, or
+  config file.
+
 - **The repo is sanitized.** Real domains/hosts/users are placeholders: `example.com`,
   `ts.example.com`, `myhost`, `exit-node`, `user`, port `8000`. **Never commit real
   tenant identifiers** — domains, org names, corporate CA names, internal IPs, usernames.
@@ -64,10 +71,12 @@ re-platforming onto a Mac-native VM — a portability tradeoff that was delibera
 5. **Corporate TLS interception (SSL-decrypt proxy).** Many managed machines blanket-decrypt
    HTTPS and re-sign with a corporate root CA — for *all* egress, including Docker and QEMU.
    Detect:
+
    ```sh
    openssl s_client -connect <host>:443 -servername <host> </dev/null 2>/dev/null \
      | openssl x509 -noout -issuer        # a corporate issuer == interception
    ```
+
    **Tailscale's *traffic* stays confidential** — control is Noise-secured and the data
    plane is WireGuard end-to-end, so the MITM can't read or tamper with it. **But the client
    still validates the TLS certificate** on its control + DERP HTTPS connections by default,
@@ -78,7 +87,19 @@ re-platforming onto a Mac-native VM — a portability tradeoff that was delibera
    the `security find-certificate` command below. (Generic HTTPS in any guest — install
    scripts, `apt` — needs the same CA trust.) *An earlier claim that a stock image "just
    works" through the MITM was wrong — the CA must be trusted.*
+
    ```sh
    # Repeat -c for each corporate CA name (the decrypt proxy often uses a vendor sub-CA too):
    security find-certificate -a -p -c "<Org>" /Library/Keychains/System.keychain > certs/corp-ca.pem
    ```
+
+## Workspace
+
+`.agents/workspace/` holds material that supports development without belonging
+to the project itself:
+
+- `followup/tasks.md` — the task list, and `followup/inbox.md` where new items
+  arrive. Managed via the `followup` skill (`/followup add:`/`triage:`/`next:`)
+  rather than edited directly, though direct edits are always fine too.
+- `MEMORY.md` — durable facts about developing in this repo worth remembering.
+- `plans/` — plan documents for larger pieces of work.

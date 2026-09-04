@@ -1,5 +1,7 @@
 # tailgate
 
+[![ci](https://github.com/chpatton013/tailgate/actions/workflows/ci.yml/badge.svg)](https://github.com/chpatton013/tailgate/actions/workflows/ci.yml)
+
 Run the [Tailscale](https://tailscale.com) client inside a container and reach a private
 [Headscale](https://github.com/juanfont/headscale) tailnet from a host that can't have a
 VPN client installed.
@@ -68,3 +70,16 @@ host-wide MagicDNS gateway VM. That approach was functionally validated but its 
 substrate (QEMU+HVF) proved unstable and is inherently platform-specific, so its code was
 removed (§10 of that doc keeps the implementation notes). The userspace proxy here is the
 portable, supported tool.
+
+## License
+
+`tailgate` is licensed under the terms of the MIT License, as described in
+[LICENSE.md](LICENSE.md).
+
+## Contributing
+
+Contributions are welcome in the form of bug reports, feature requests, or pull
+requests.
+
+Contribution to `tailgate` is organized under the terms of the [Contributor
+Covenant](CONTRIBUTOR_COVENANT.md).

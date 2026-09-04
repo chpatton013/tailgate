@@ -10,6 +10,7 @@ Date: 2026-05-31
 > **Where this landed (read first).** The **shipped product is the userspace SOCKS5/HTTP
 > proxy** described below as "Tier 1" — see the repo README and `docs/usage.md`. The other
 > tiers are recorded here as history/design, not as a committed roadmap:
+>
 > - *Tier 0* (operate from inside a TUN container) was a throwaway validation step and has
 >   been removed from the repo.
 > - *Tier 2* (transparent L3 routing + host-wide MagicDNS via a gateway VM) was
@@ -168,6 +169,7 @@ self-documenting nature), and possibly QEMU.
 | **Raw QEMU / UTM** | Most efficient | Most manual; least self-documenting | Optimization, not first build |
 
 **Recommendation:**
+
 - Prove the proxy tier with **Docker** (fastest to a working demo).
 - Build the transparent tiers on **Vagrant + QEMU** (the Apple Silicon choice), with a
   self-documenting `Vagrantfile` + a provider-agnostic shell provisioner so the guest
@@ -196,6 +198,7 @@ cumulative.
 services. Accept heavy manual operation. You work *inside* the guest.
 
 **Build:**
+
 - A `tailscale/tailscale` container (Docker) or a one-box `Vagrantfile`, running in
   **TUN mode** (`TS_USERSPACE=false`, `--cap-add=NET_ADMIN`, `--device=/dev/net/tun`).
 - Manually mint a pre-auth key (Headplane UI, or the Headscale REST API with the
@@ -204,6 +207,7 @@ services. Accept heavy manual operation. You work *inside* the guest.
   `TS_HOSTNAME=tailgate-laptop`, persistent `TS_STATE_DIR`.
 
 **Use:**
+
 - `docker exec -it ts tailscale status` / `vagrant ssh` then `ssh user@100.64.x.y`,
   `curl https://app.ts.example.com` — **all from inside the guest**, where
   MagicDNS already works.
@@ -223,6 +227,7 @@ foundation everything else stands on.
 entering the VM. No host network changes; least invasive.
 
 **Build:**
+
 - Run `tailscaled` in **userspace mode** with a proxy exposed to the host:
   - Docker: `TS_USERSPACE=true`, `TS_SOCKS5_SERVER=0.0.0.0:1055`
     (optionally `TS_OUTBOUND_HTTP_PROXY_LISTEN=0.0.0.0:1056`), published `-p
@@ -230,6 +235,7 @@ entering the VM. No host network changes; least invasive.
 - The proxy speaks SOCKS5 and HTTP on the same port if you point both flags at it.
 
 **Use (per-tool):**
+
 - **SSH:** `ssh -o ProxyCommand='nc -X 5 -x 127.0.0.1:1055 %h %p' user@nodename` — or a
   `~/.ssh/config` block for `Host *.ts.example.com`. Because the proxy resolves names,
   MagicDNS names work.
@@ -255,6 +261,7 @@ This tier is the **sweet spot for "good enough" daily use** and a clean stepping
 with **no per-app configuration**. The VM is a gateway/relay.
 
 **Build (Vagrant + QEMU):**
+
 1. VM has a **host-reachable IP on a shared/vmnet network** with a fixed address, e.g.
    `192.168.64.10` (resolve the QEMU networking wrinkle from §4 first — vmnet bridged
    networking rather than default SLIRP).
@@ -368,6 +375,7 @@ changes, with keys that rotate themselves.
 Two spikes were run on the actual managed laptop (Apple Silicon, macOS 26.x).
 
 **DNS / split-DNS feasibility — CONFIRMED working.**
+
 - No MDM/profile DNS override exists (no `com.apple.dnsProxy` / `com.apple.dnsSettings`
   payload, no profile-scoped resolver, clean `scutil --dns`). The classic
   Config-Profile-outranks-`/etc/resolver` failure mode is **absent** here.
@@ -379,6 +387,7 @@ Two spikes were run on the actual managed laptop (Apple Silicon, macOS 26.x).
   resolution, and the routing question it raised is now **settled** — see below.
 
 **Routing through the gateway — PROBE PASSED (the decisive Tier 2 result).**
+
 - With a host route `100.64.0.0/10 → <gateway VM IP>`, the host reached a real tailnet
   peer over **both ICMP and TCP:22** (`ttl` decremented through the gateway hop). The
   corporate all-networks proxy does **not** intercept CGNAT-routed traffic.
@@ -386,10 +395,11 @@ Two spikes were run on the actual managed laptop (Apple Silicon, macOS 26.x).
   (verified via `openssl s_client` — every host re-signed by the corporate
   SSL-decrypt CA). Tailscale is unaffected (Noise control plane, WireGuard E2E data), so
   the tunnel works and stays confidential; only generic HTTPS in the guest needed the
-  corporate root CA installed (handled by `tier2/`). See `CLAUDE.md` for the general rule.
+  corporate root CA installed (handled by `tier2/`). See `AGENTS.md` for the general rule.
 - **Conclusion: the transparent "just works" endgame is achievable on this machine.**
 
 **QEMU host-reachable IP — SOLVED, needs setup.**
+
 - Installed: QEMU 10.1.1 (vmnet netdevs compiled in), Vagrant 2.4.9, `vagrant-qemu`
   0.3.6. Missing: `socket_vmnet`. Blocker: `vagrant plugin list` currently fails (a
   stale `vagrant-cachier` pin) and must be repaired first.
@@ -401,6 +411,7 @@ Two spikes were run on the actual managed laptop (Apple Silicon, macOS 26.x).
   forces a redesign (no L3 route; `/etc/resolver` → `127.0.0.1:<fwd>` only).
 - IPv6 (`fd7a:115c:a1e0::/48`): treat **IPv4-only as the pragmatic target**; defer v6.
 - One-time setup commands:
+
   ```sh
   vagrant plugin expunge --reinstall          # repair the broken plugin state first
   brew install socket_vmnet

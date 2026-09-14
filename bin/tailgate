@@ -8,7 +8,8 @@
 #   tailgate logs           follow container logs
 #   tailgate ssh <host> ... ssh to a tailnet node through the SOCKS5 proxy
 #   tailgate curl <args>    curl through the SOCKS5 proxy (remote DNS = MagicDNS works)
-#   tailgate forward [user@]host <rport> [lport] [ssh args]   forward a node's loopback port
+#   tailgate forward [user@]host [<remote-addr>:]<remote-port> [[<local-addr>:]local-port] [ssh args]
+#                         forward a remote service to a local listener
 #   tailgate proxy          print proxy addresses + shell export hints
 #   tailgate doctor         diagnose the setup end to end
 set -euo pipefail
@@ -115,34 +116,116 @@ cmd_curl() {
   curl --proxy "socks5h://${SOCKS5_ADDR}" "$@"
 }
 
+parse_forward_endpoint() {
+  # Sets FORWARD_ADDRESS and FORWARD_PORT. Addresses containing colons must use
+  # brackets so the endpoint remains unambiguous.
+  local endpoint="$1" default_address="$2" role="$3"
+  local address port colons
+  FORWARD_ADDRESS="$default_address"
+  FORWARD_PORT=""
+
+  if [[ "$endpoint" =~ ^[0-9]+$ ]]; then
+    port="$endpoint"
+  elif [[ "$endpoint" == \[* ]]; then
+    if [[ "$endpoint" =~ ^\[([^][]+)\]:([0-9]+)$ ]]; then
+      address="${BASH_REMATCH[1]}"
+      port="${BASH_REMATCH[2]}"
+    else
+      err "$role endpoint '$endpoint' is malformed; use <address>:<port> or [<IPv6-address>]:<port>"
+      return 1
+    fi
+  elif [[ "$endpoint" == *:* ]]; then
+    colons="${endpoint//[^:]/}"
+    if [[ ${#colons} -ne 1 ]]; then
+      err "$role endpoint '$endpoint': IPv6 addresses must use bracketed syntax ([address]:port)"
+      return 1
+    fi
+    address="${endpoint%:*}"
+    port="${endpoint##*:}"
+    if [[ -z "$address" ]]; then
+      err "$role endpoint address must not be empty (got '$endpoint')"
+      return 1
+    fi
+    if ! [[ "$port" =~ ^[0-9]+$ ]]; then
+      err "$role endpoint port must be numeric (got '$port')"
+      return 1
+    fi
+  else
+    err "$role endpoint '$endpoint' is malformed; use a port or <address>:<port>"
+    return 1
+  fi
+
+  FORWARD_ADDRESS="${address:-$default_address}"
+  FORWARD_PORT="$port"
+}
+
+forward_ssh_address() {
+  if [[ "$1" == *:* ]]; then
+    printf '[%s]' "$1"
+  else
+    printf '%s' "$1"
+  fi
+}
+
+forward_display_address() {
+  if [[ "$1" == *:* ]]; then
+    printf '[%s]' "$1"
+  else
+    printf '%s' "$1"
+  fi
+}
+
 cmd_forward() {
-  # Forward a tailnet node's loopback-bound port to the host, tunneled through
-  # the SOCKS5 proxy. For services that bind to 127.0.0.1 on the node (e.g.
-  # myhost's gateway on 8000) and so aren't reachable over the tailnet directly.
+  # Forward a service on a tailnet node to a local listener, tunneled through
+  # the SOCKS5 proxy. Remote endpoints default to node loopback; `ts` uses the
+  # SSH target hostname so the node connects through its Tailscale interface.
   #
   # Host is [user@]host, exactly like ssh: a bare alias resolves via ~/.ssh/config,
   # or give user@host plus any ssh flags (e.g. -i key) and need no config at all.
   #
   #   tailgate forward myhost 8000
-  #   tailgate forward user@myhost.ts.example.com 8000 -i ~/.ssh/id_ed25519
-  #   tailgate forward myhost 8000 28789 -i ~/.ssh/key   # local port 28789
+  #   tailgate forward myhost ts:8000
+  #   tailgate forward myhost 100.64.0.8:8000 127.0.0.1:28789 -i ~/.ssh/key
+  #   tailgate forward myhost [fd7a::12]:8000 [::1]:28789
   if [[ $# -lt 2 ]]; then
-    err "usage: tailgate forward [user@]host <remote-port> [local-port] [ssh args...]"; exit 1
+    err "usage: tailgate forward [user@]host [<remote-addr>:]<remote-port> [[<local-addr>:]local-port] [ssh args...]"
+    exit 1
   fi
-  local host="$1"; shift
-  local rport="$1"; shift
-  if ! [[ "$rport" =~ ^[0-9]+$ ]]; then
-    err "remote-port must be numeric (got '$rport')"; exit 1
+  local host="$1" remote_endpoint local_endpoint
+  local remote_address remote_port local_address local_port local_display remote_display
+  shift
+  remote_endpoint="$1"; shift
+  parse_forward_endpoint "$remote_endpoint" "127.0.0.1" "remote" || exit 1
+  remote_address="$FORWARD_ADDRESS"
+  remote_port="$FORWARD_PORT"
+  if [[ "$remote_address" == "ts" ]]; then remote_address="${host#*@}"; fi
+
+  local_address="127.0.0.1"
+  local_port="$remote_port"
+  # An endpoint-shaped next argument selects the local listener. SSH options
+  # begin with '-' and remain untouched with the arguments that follow them.
+  if [[ "${1:-}" =~ ^[0-9]+$ || "${1:-}" == *:* || "${1:-}" == \[* ]]; then
+    local_endpoint="$1"; shift
+    parse_forward_endpoint "$local_endpoint" "127.0.0.1" "local" || exit 1
+    local_address="$FORWARD_ADDRESS"
+    local_port="$FORWARD_PORT"
+  elif [[ -n "${1:-}" && "${1:-}" != -* ]]; then
+    err "local endpoint '$1' is malformed; use a port or <address>:<port>, or begin SSH arguments with '-'"
+    exit 1
   fi
-  local lport="$rport"
-  # An optional numeric next arg is the local port; anything starting with '-'
-  # (or non-numeric) is left for ssh.
-  if [[ "${1:-}" =~ ^[0-9]+$ ]]; then lport="$1"; shift; fi
-  info "Forwarding http://localhost:${lport}  ->  ${host}:127.0.0.1:${rport}  (Ctrl-C to stop)"
+
+  if [[ "$local_address" == "127.0.0.1" ]]; then
+    local_display="localhost"
+  else
+    local_display="$(forward_display_address "$local_address")"
+  fi
+  remote_display="$(forward_display_address "$remote_address")"
+  info "Forwarding http://${local_display}:${local_port}  ->  ${host}:${remote_display}:${remote_port}  (Ctrl-C to stop)"
   # Remaining "$@" are passthrough ssh args; host goes last.
   ssh -N -o ExitOnForwardFailure=yes \
     -o ProxyCommand="nc -X 5 -x ${SOCKS5_ADDR} %h %p" \
-    -L "${lport}:127.0.0.1:${rport}" "$@" "$host"
+    -L "$(forward_ssh_address "$local_address"):${local_port}:$(forward_ssh_address "$remote_address"):${remote_port}" \
+    "$@" "$host"
 }
 
 cmd_proxy() {

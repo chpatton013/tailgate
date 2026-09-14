@@ -96,21 +96,51 @@ the resulting Tailnet IP to tailscaled's loopback-only SOCKS server.
 > hit that against an HTTPS service, use plain `http://`, add `-k` for a self-signed
 > cert, or install OpenSSL-backed curl (`brew install curl`).
 
-### Loopback-bound services (`tailgate forward`)
+### Forward services (`tailgate forward`)
 
-A service bound to `127.0.0.1` on a node (e.g. a gateway UI on `:8000`) is *not*
-reachable over the tailnet directly. Forward it to the host instead. The host argument
-is `[user@]host` and any extra flags pass straight through to `ssh`:
+`tailgate forward` tunnels a service on a node to a listener on the host. Its syntax is:
+
+```text
+tailgate forward [user@]host [<remote-addr>:]<remote-port> [[<local-addr>:]local-port] [ssh args...]
+```
+
+The remote destination defaults to `127.0.0.1`, and the local listener defaults to
+`127.0.0.1` on the same port. A service bound to node loopback (for example, a gateway
+UI on `:8000`) is not reachable over the tailnet directly, so the default handles that
+case:
 
 ```sh
-# via a ~/.ssh/config alias:
+# remote 127.0.0.1:8000 -> local 127.0.0.1:8000
 ./bin/tailgate forward myhost 8000                 # then browse http://localhost:8000
 
 # or fully self-contained, no ssh config needed:
 ./bin/tailgate forward user@myhost.ts.example.com 8000 -i ~/.ssh/id_ed25519
 
-# pick a different local port (here 28789 -> remote 8000):
+# pick a different local port (28789 -> remote loopback 8000):
 ./bin/tailgate forward myhost 8000 28789 -i ~/.ssh/id_ed25519
+```
+
+Specify a remote address when the service is bound somewhere other than loopback. The
+reserved remote address `ts` expands to the SSH target hostname with any `user@` prefix
+removed, so the node connects to its own Tailscale-resolved hostname without requiring a
+known `100.x` address:
+
+```sh
+# remote myhost.ts.example.com:8000 -> local 127.0.0.1:8000
+./bin/tailgate forward user@myhost.ts.example.com ts:8000
+
+# remote tailnet address -> a different local listener port
+./bin/tailgate forward myhost 100.64.0.8:8000 28789
+
+# expose the local listener to other local-network clients
+./bin/tailgate forward myhost ts:8000 0.0.0.0:28789
+```
+
+The remote address identifies where the node's SSH server connects; the local address
+identifies where this host listens. Use bracketed endpoints for IPv6:
+
+```sh
+./bin/tailgate forward myhost '[fd7a::12]:8000' '[::1]:28789'
 ```
 
 Leave it running (Ctrl-C stops it). The tailnet-native alternative is to publish the

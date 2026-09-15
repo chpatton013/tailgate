@@ -107,7 +107,10 @@ tailgate forward [user@]host [<remote-addr>:]<remote-port> [[<local-addr>:]local
 The remote destination defaults to `127.0.0.1`, and the local listener defaults to
 `127.0.0.1` on the same port. A service bound to node loopback (for example, a gateway
 UI on `:8000`) is not reachable over the tailnet directly, so the default handles that
-case:
+case. The `host` value must contain only shell-safe SSH target characters; the wrappers
+reject shell metacharacters before placing the target in their `ProxyCommand`. Use separate
+SSH options rather than combined short-option clusters such as `-vi`; attached arguments
+such as `-iKEY` remain supported.
 
 ```sh
 # remote 127.0.0.1:8000 -> local 127.0.0.1:8000

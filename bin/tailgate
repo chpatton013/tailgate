@@ -6,7 +6,7 @@
 #   tailgate status         tailscale status (from inside the container)
 #   tailgate ip             this node's tailnet IP(s)
 #   tailgate logs           follow container logs
-#   tailgate ssh <host> ... ssh to a tailnet node through the SOCKS5 proxy
+#   tailgate ssh [ssh args...] <host> ssh to a tailnet node through the SOCKS5 proxy
 #   tailgate curl <args>    curl through the SOCKS5 proxy (remote DNS = MagicDNS works)
 #   tailgate forward [user@]host [<remote-addr>:]<remote-port> [[<local-addr>:]local-port] [ssh args]
 #                         forward a remote service to a local listener
@@ -104,8 +104,98 @@ cmd_logs()   { compose logs -f "$SERVICE"; }
 cmd_status() { compose exec "$SERVICE" tailscale status "$@"; }
 cmd_ip()     { compose exec "$SERVICE" tailscale ip "$@"; }
 
+validate_ssh_target() {
+  local target="$1" candidate="$1"
+  # ProxyCommand is interpreted by a shell after OpenSSH expands %h. Permit
+  # host syntax that SSH accepts while rejecting shell metacharacters before
+  # the target can reach that command string.
+  candidate="${candidate//\[/}"
+  candidate="${candidate//\]/}"
+  if [[ "$candidate" == -* || -z "$candidate" || ! "$candidate" =~ ^[[:alnum:]_.@:%+_-]+$ ]]; then
+    err "host contains unsupported shell characters: '$target'"
+    return 1
+  fi
+}
+
+reject_ssh_option_cluster() {
+  local option="$1"
+  # Keep attached arguments such as -iKEY and -Lspec valid, but fail closed
+  # for clusters like -vi whose parsing could otherwise shift the host.
+  if [[ "$option" =~ ^-[[:alpha:]][[:alpha:]]+$ && ! "$option" =~ ^-(B|b|c|D|E|F|I|i|J|L|l|m|O|o|p|Q|R|S|W|w|X|x).+$ ]]; then
+    err "combined SSH option clusters are unsupported; use separate options: '$option'"
+    return 1
+  fi
+}
+
+ssh_option_takes_arg() {
+  case "$1" in
+    -B|-b|-c|-D|-E|-F|-I|-i|-J|-L|-l|-m|-O|-o|-p|-Q|-R|-S|-W|-w|-X|-x|-e)
+      return 0 ;;
+    *)  return 1 ;;
+  esac
+}
+
+find_ssh_target() {
+  local arg
+  while [[ $# -gt 0 ]]; do
+    arg="$1"
+    shift
+    if [[ "$arg" == "--" ]]; then
+      if [[ $# -eq 0 ]]; then
+        err "ssh target is missing after '--'"
+        return 1
+      fi
+      SSH_TARGET="$1"
+      return 0
+    fi
+    if [[ "$arg" == -* && "$arg" != "-" ]]; then
+      reject_ssh_option_cluster "$arg" || return 1
+      if ssh_option_takes_arg "$arg"; then
+        if [[ $# -eq 0 ]]; then
+          err "ssh option '$arg' requires an argument"
+          return 1
+        fi
+        shift
+      fi
+      continue
+    fi
+    SSH_TARGET="$arg"
+    return 0
+  done
+  err "ssh target is missing"
+  return 1
+}
+
+validate_forward_ssh_args() {
+  local arg
+  while [[ $# -gt 0 ]]; do
+    arg="$1"
+    shift
+    if [[ "$arg" == "--" ]]; then
+      if [[ $# -gt 0 ]]; then
+        err "unexpected positional SSH argument after '--': '$1'"
+        return 1
+      fi
+      return 0
+    fi
+    if [[ "$arg" == "-" || "$arg" != -* ]]; then
+      err "unexpected positional SSH argument: '$arg'"
+      return 1
+    fi
+    if ssh_option_takes_arg "$arg"; then
+      if [[ $# -eq 0 ]]; then
+        err "ssh option '$arg' requires an argument"
+        return 1
+      fi
+      shift
+    fi
+  done
+}
+
 cmd_ssh() {
-  if [[ $# -lt 1 ]]; then err "usage: tailgate ssh <host> [ssh args...]"; exit 1; fi
+  if [[ $# -lt 1 ]]; then err "usage: tailgate ssh [ssh args...] <host>"; exit 1; fi
+  find_ssh_target "$@" || exit 1
+  validate_ssh_target "$SSH_TARGET" || exit 1
   # nc -X 5 -x <proxy> performs SOCKS5; the hostname is resolved at the proxy,
   # so MagicDNS names (*.ts.example.com) work. If your nc resolves locally,
   # pass the 100.x address instead.
@@ -175,10 +265,39 @@ forward_display_address() {
   fi
 }
 
+resolve_forward_ts_address() {
+  local host="$1" ssh_config ssh_hostname resolver_name address
+  shift
+
+  if ! ssh_config="$(ssh -G "$@" "$host" 2>/dev/null)"; then
+    err "ts endpoint: could not read SSH configuration for '$host'"
+    return 1
+  fi
+  ssh_hostname="$(awk '$1 == "hostname" { print $2; exit }' <<<"$ssh_config")"
+  if [[ -z "$ssh_hostname" ]]; then
+    err "ts endpoint: SSH configuration for '$host' has no hostname"
+    return 1
+  fi
+
+  # SSH aliases are commonly a single node name. The SOCKS shim resolves
+  # configured Tailnet names only, so make its DNS suffix explicit.
+  resolver_name="$ssh_hostname"
+  if [[ "$resolver_name" != *.* && "$resolver_name" != *:* ]]; then
+    resolver_name="${resolver_name}.${TAILNET_SUFFIX}"
+  fi
+
+  if ! address="$(compose exec -T "$SERVICE" tailgate-socks --resolve "$resolver_name" 2>&1)"; then
+    err "ts endpoint: could not resolve SSH host '$resolver_name' through Tailgate DNS"
+    [[ -n "$address" ]] && err "$address"
+    return 1
+  fi
+  printf '%s' "$address"
+}
+
 cmd_forward() {
   # Forward a service on a tailnet node to a local listener, tunneled through
-  # the SOCKS5 proxy. Remote endpoints default to node loopback; `ts` uses the
-  # SSH target hostname so the node connects through its Tailscale interface.
+  # the SOCKS5 proxy. Remote endpoints default to node loopback; `ts` resolves
+  # the configured SSH target through Tailgate DNS to reach its Tailnet address.
   #
   # Host is [user@]host, exactly like ssh: a bare alias resolves via ~/.ssh/config,
   # or give user@host plus any ssh flags (e.g. -i key) and need no config at all.
@@ -193,18 +312,18 @@ cmd_forward() {
   fi
   local host="$1" remote_endpoint local_endpoint
   local remote_address remote_port local_address local_port local_display remote_display
+  validate_ssh_target "$host" || exit 1
   shift
   remote_endpoint="$1"; shift
   parse_forward_endpoint "$remote_endpoint" "127.0.0.1" "remote" || exit 1
   remote_address="$FORWARD_ADDRESS"
   remote_port="$FORWARD_PORT"
-  if [[ "$remote_address" == "ts" ]]; then remote_address="${host#*@}"; fi
 
   local_address="127.0.0.1"
   local_port="$remote_port"
   # An endpoint-shaped next argument selects the local listener. SSH options
   # begin with '-' and remain untouched with the arguments that follow them.
-  if [[ "${1:-}" =~ ^[0-9]+$ || "${1:-}" == *:* || "${1:-}" == \[* ]]; then
+  if [[ "${1:-}" != -* && ( "${1:-}" =~ ^[0-9]+$ || "${1:-}" == *:* || "${1:-}" == \[* ) ]]; then
     local_endpoint="$1"; shift
     parse_forward_endpoint "$local_endpoint" "127.0.0.1" "local" || exit 1
     local_address="$FORWARD_ADDRESS"
@@ -212,6 +331,11 @@ cmd_forward() {
   elif [[ -n "${1:-}" && "${1:-}" != -* ]]; then
     err "local endpoint '$1' is malformed; use a port or <address>:<port>, or begin SSH arguments with '-'"
     exit 1
+  fi
+  validate_forward_ssh_args "$@" || exit 1
+
+  if [[ "$remote_address" == "ts" ]]; then
+    remote_address="$(resolve_forward_ts_address "$host" "$@")" || exit 1
   fi
 
   if [[ "$local_address" == "127.0.0.1" ]]; then
